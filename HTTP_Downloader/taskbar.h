@@ -26,6 +26,8 @@ const IID _IID_ITaskbarList3 =	{ 0xEA1AFB91, 0x9E28, 0x4B86, { 0x90, 0xE9, 0x9E,
 
 const CLSID _CLSID_TaskbarList = { 0x56FDF344, 0xFD6D, 0x11D0, { 0x95, 0x8A, 0x00, 0x60, 0x97, 0xC9, 0xA0, 0x90 } };
 
+#if _MSC_VER < 1900
+
 typedef enum THUMBBUTTONFLAGS
 {
 	THBF_ENABLED =			0x00,
@@ -64,6 +66,8 @@ typedef enum TBPFLAG
 	TBPF_ERROR =			0x04,
 	TBPF_PAUSED	=			0x08
 } TBPFLAG;
+
+#endif
 
 struct _ITaskbarList3;
 
