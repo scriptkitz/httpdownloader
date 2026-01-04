@@ -1,3 +1,45 @@
+Version:	1.0.6.9
+Released:	2025-12-09
+
+Added OpenSSL/BoringSSL support.
+Increased Schannel buffers for faster SSL/TLS downloads.
+Fixed columns not saving their widths if DPI scaling is more than 100%.
+Multiline clipboard URLs that don't have carriage returns will now display correctly in the Add URL(s) window.
+Fixed FTP keep-alive request buffer being too small when using SSL/TLS.
+Fixed web server not applying changes while program is running.
+Fixed crash when switching between PKCS #12 and Public/Private keys for web server.
+Fixed stalling TLS 1.3 connections.
+Downloads with 100% progress that don't have a Completed status can now be resumed.
+Fixed buffer overflow when reading saved files.
+
+Version:	1.0.6.8
+Released:	2025-11-10
+
+Added TLS 1.3 support for Windows 11 systems.
+Fixed SSL/TLS support for web server.
+
+Version:	1.0.6.7
+Released:	2025-10-29
+
+Fixed clipboard command-line argument not working.
+
+Version:	1.0.6.6
+Released:	2025-10-26
+
+Added per-monitor DPI support.
+Added category list to filter downloads.
+Embedded executable icons can now be displayed in the download list.
+Fixed some painting issues in the dark mode version.
+Prevented sharing violation if files with the same name are downloaded in parallel.
+Added command-line argument to add clipboard content.
+System Tray notifications can now be displayed for remote connections (from browser extensions).
+Download directory can now be updated in the Update Download window.
+Downloads can now have comments added to them.
+Finished downloads can now play a Success or Failure sound.
+Added custom threshold for reallocating parts.
+Added context menu key support.
+Search window can now search comments.
+
 Version:	1.0.6.5
 Released:	2024-10-04
 

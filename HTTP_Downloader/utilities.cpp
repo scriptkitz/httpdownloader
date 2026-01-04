@@ -199,6 +199,12 @@ wchar_t *cfg_certificate_pkcs_password = NULL;
 wchar_t *cfg_certificate_cer_file_name = NULL;
 wchar_t *cfg_certificate_key_file_name = NULL;
 
+char *g_certificate_pkcs_file_name = NULL;
+char *g_certificate_pkcs_password = NULL;
+
+char *g_certificate_cer_file_name = NULL;
+char *g_certificate_key_file_name = NULL;
+
 bool cfg_use_authentication = false;
 wchar_t *cfg_authentication_username = NULL;
 wchar_t *cfg_authentication_password = NULL;
@@ -429,18 +435,20 @@ bool kill_worker_thread_flag = false;	// Allow for a clean shutdown.
 
 bool g_download_history_changed = false;
 
-bool IsWindowsVersionOrGreater( WORD wMajorVersion, WORD wMinorVersion, WORD wServicePackMajor )
+bool IsWindowsVersionOrGreater( WORD wMajorVersion, WORD wMinorVersion, WORD wBuildNumber )
 {
 	OSVERSIONINFOEXW osvi;
 	_memzero( &osvi, sizeof( OSVERSIONINFOEXW ) );
 	osvi.dwOSVersionInfoSize = sizeof( OSVERSIONINFOEXW );
 	osvi.dwMajorVersion = wMajorVersion;
 	osvi.dwMinorVersion = wMinorVersion;
-	osvi.wServicePackMajor = wServicePackMajor;
+	osvi.dwBuildNumber = wBuildNumber;
 
-	DWORDLONG const dwlConditionMask = VerSetConditionMask( VerSetConditionMask( VerSetConditionMask( 0, VER_MAJORVERSION, VER_GREATER_EQUAL ), VER_MINORVERSION, VER_GREATER_EQUAL ), VER_SERVICEPACKMAJOR, VER_GREATER_EQUAL );
+	DWORDLONG dwlConditionMask = VerSetConditionMask( 0, VER_MAJORVERSION, VER_GREATER_EQUAL );
+			  dwlConditionMask = VerSetConditionMask( dwlConditionMask, VER_MINORVERSION, VER_GREATER_EQUAL );
+			  dwlConditionMask = VerSetConditionMask( dwlConditionMask, VER_BUILDNUMBER, VER_GREATER_EQUAL );
 
-	return VerifyVersionInfoW( &osvi, VER_MAJORVERSION | VER_MINORVERSION | VER_SERVICEPACKMAJOR, dwlConditionMask ) != FALSE;
+	return VerifyVersionInfoW( &osvi, VER_MAJORVERSION | VER_MINORVERSION | VER_BUILDNUMBER, dwlConditionMask ) != FALSE;
 }
 
 int dllrbt_compare_a( void *a, void *b )
@@ -786,6 +794,24 @@ wchar_t *GlobalStrDupW( const wchar_t *_Str )
 	_memcpy_s( ret, size, _Str, size );
 
 	return ret;
+}
+
+wchar_t *UTF8StringToWideString( char *utf8_string, int string_length )
+{
+	int wide_val_length = MultiByteToWideChar( CP_UTF8, 0, utf8_string, string_length, NULL, 0 );	// Include the NULL terminator.
+	wchar_t *wide_val = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * wide_val_length );
+	MultiByteToWideChar( CP_UTF8, 0, utf8_string, string_length, wide_val, wide_val_length );
+
+	return wide_val;
+}
+
+char *WideStringToUTF8String( wchar_t *wide_string, int *utf8_string_length, int buffer_offset )
+{
+	*utf8_string_length = WideCharToMultiByte( CP_UTF8, 0, wide_string, -1, NULL, 0, NULL, NULL ) + buffer_offset;
+	char *utf8_val = ( char * )GlobalAlloc( GPTR, sizeof( char ) * *utf8_string_length ); // Size includes the NULL character.
+	*utf8_string_length = WideCharToMultiByte( CP_UTF8, 0, wide_string, -1, utf8_val + buffer_offset, *utf8_string_length - buffer_offset, NULL, NULL );
+
+	return utf8_val;
 }
 
 char *strnchr( const char *s, int c, int n )

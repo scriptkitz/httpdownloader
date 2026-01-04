@@ -221,7 +221,7 @@ Controlla aggiornamenti all'avvio
 Vicino alla barra di sistema
 Abilita icona nella barra delle applicazioni:
 Abilita finestra rilascio URL:
-Failure:
+Errore:
 Carica file audio download completato
 Riduci ad icona nella barra di sistema
 Riproduci audio a download completati
@@ -416,6 +416,7 @@ Timeout
 TLS 1.0
 TLS 1.1
 TLS 1.2
+TLS 1.3
 Totale download:
 Illimitato
 Aggiorna
@@ -461,7 +462,7 @@ Il percorso specificato non è stato trovato.
 Il sito specificato esiste già.
 Il sito specificato non è valido.
 Il nome utente e l'host specificati esistono già.
- In questo percorso esiste già un file con lo stesso nome.
+In questo percorso esiste già un file con lo stesso nome.
 È necessario impostare un cartella download.
 Beta
 Build:
