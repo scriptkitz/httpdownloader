@@ -163,7 +163,7 @@ bool move_file_process_active = false;
 
 unsigned int g_session_status_count[ NUM_SESSION_STATUS ] = { 0 };	// 9 states that can be considered finished (Completed, Stopped, Failed, etc.)
 
-volatile LONG g_status_count[ 16 ] = { 0 };
+volatile LONG g_status_count[ 17 ] = { 0 };	// 17 states (indices 0 - 16). STATUS_INSUFFICIENT_DISK_SPACE maps to index 16.
 
 bool g_timers_running = false;
 
@@ -282,7 +282,7 @@ void SetStatus( DOWNLOAD_INFO *di, unsigned int status )
 							--first_selection_index;
 						}
 						g_first_selection_node = first_selection_node;
-						g_first_selection_index = g_first_selection_index;
+						g_first_selection_index = first_selection_index;
 					}
 
 					// Cancel Selection.
@@ -4786,6 +4786,9 @@ bool CreateConnection( SOCKET_CONTEXT *context, char *host, unsigned short port 
 	g_hIOCP = CreateIoCompletionPort( ( HANDLE )socket, g_hIOCP, 0/*( ULONG_PTR )context*/, 0 );
 	if ( g_hIOCP == NULL )
 	{
+		_closesocket( socket );	// Don't leak the socket.
+		context->socket = INVALID_SOCKET;
+
 		return false;
 	}
 
@@ -9775,7 +9778,7 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 								{
 									wchar_t *file_path_delete;
 
-									wchar_t file_path[ MAX_PATH + 1 ];
+									wchar_t file_path[ MAX_PATH + 2 ];	// SHFILEOPSTRUCTW.pFrom requires a double NULL terminator.
 									if ( cfg_use_temp_download_directory )
 									{
 										GetTemporaryFilePath( shared_info, file_path );

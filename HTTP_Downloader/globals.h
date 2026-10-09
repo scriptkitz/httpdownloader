@@ -302,7 +302,7 @@ extern int g_file_size_cmb_ret;			// Message box prompt for large files sizes.
 
 extern HANDLE worker_semaphore;			// Blocks shutdown while a worker thread is active.
 extern bool in_worker_thread;
-extern bool kill_worker_thread_flag;	// Allow for a clean shutdown.
+extern volatile bool kill_worker_thread_flag;	// Allow for a clean shutdown.
 
 extern bool g_download_history_changed;
 

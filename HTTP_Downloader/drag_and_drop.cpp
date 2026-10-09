@@ -791,20 +791,32 @@ HRESULT STDMETHODCALLTYPE IDropTarget_Drop( IDropTarget *This, IDataObject *pDat
 				// Reallocate the data buffer since it doesn't include a NULL terminator. (STUPID!!!)
 				SIZE_T data_size = GlobalSize( stgm.hGlobal );
 
-				HGLOBAL reallocated_data = GlobalReAlloc( data, data_size + sizeof( char ), GMEM_ZEROINIT );
+				// GlobalReAlloc requires the HGLOBAL handle and the block must not be locked.
+				GlobalUnlock( stgm.hGlobal );
+
+				HGLOBAL reallocated_data = GlobalReAlloc( stgm.hGlobal, data_size + sizeof( char ), GMEM_ZEROINIT );
 				if ( reallocated_data != NULL )
 				{
-					data = reallocated_data;
-				}
-				else
-				{
-					char *t_data = ( char * )data;
-					t_data[ ( data_size > 0 ? ( data_size - 1 ) : 0 ) ] = 0;
+					stgm.hGlobal = reallocated_data;	// ReleaseStgMedium will free the reallocated buffer.
 				}
 
-				// We can reuse the data pointer since it's original pointer is in stgm and freed with ReleaseStgMedium.
-				// If ParseHTMLClipboard allocates memory, then we'll free it with the GlobalFree below.
-				data = ParseHTMLClipboard( ( char * )data );
+				data = GlobalLock( stgm.hGlobal );
+
+				if ( data != NULL )
+				{
+					if ( reallocated_data != NULL )
+					{
+						( ( char * )data )[ data_size ] = 0;	// Sanity. The buffer grew by one byte.
+					}
+					else if ( data_size > 0 )
+					{
+						( ( char * )data )[ data_size - 1 ] = 0;	// Fallback: terminate within the existing buffer.
+					}
+
+					// We can reuse the data pointer since its original pointer is in stgm and freed with ReleaseStgMedium.
+					// If ParseHTMLClipboard allocates memory, then we'll free it with the GlobalFree below.
+					data = ParseHTMLClipboard( ( char * )data );
+				}
 
 				if ( data == NULL )
 				{

@@ -1284,7 +1284,13 @@ char GetFTPResponseContent( SOCKET_CONTEXT *context, char *response_buffer, unsi
 			{
 				last_line = end_of_line;
 
-				end_of_line = _StrStrA( last_line, "\r\n" ) + 2;
+				char *next_line = _StrStrA( last_line, "\r\n" );
+				if ( next_line == NULL )
+				{
+					break;	// Malformed response. Don't dereference a NULL pointer.
+				}
+
+				end_of_line = next_line + 2;
 
 				if ( ( end_of_line - last_line ) >= 6 )
 				{

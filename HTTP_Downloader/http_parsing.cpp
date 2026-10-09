@@ -1212,11 +1212,18 @@ unsigned int DecompressStream( SOCKET_CONTEXT *context, char *buffer, unsigned i
 			// Allocate more memory if we have any remaining data in our buffer to decompress.
 			if ( stream_ret == Z_OK && context->stream.avail_in > 0 && context->decompressed_buf != NULL )
 			{
-				context->decompressed_buf_size += ZLIB_CHUNK;
-				char *realloc_buffer = ( char * )GlobalReAlloc( context->decompressed_buf, sizeof( char ) * context->decompressed_buf_size, GMEM_MOVEABLE );
+				// Grow the buffer geometrically to reduce the number of reallocations.
+				unsigned int new_size = context->decompressed_buf_size + ( context->decompressed_buf_size >= ZLIB_CHUNK ? context->decompressed_buf_size : ZLIB_CHUNK );
+				char *realloc_buffer = ( char * )GlobalReAlloc( context->decompressed_buf, sizeof( char ) * new_size, GMEM_MOVEABLE );
 				if ( realloc_buffer != NULL )
 				{
 					context->decompressed_buf = realloc_buffer;
+					context->decompressed_buf_size = new_size;
+				}
+				else
+				{
+					// Out of memory. Stop decompressing instead of writing past our buffer.
+					stream_ret = Z_MEM_ERROR;
 				}
 			}
 		}
@@ -1541,6 +1548,14 @@ void GetContentRange( char *header, RANGE_INFO *range_info )
 					clength[ 20 ] = 0;	// Sanity
 
 					range_info->content_length = strtoull( clength );
+
+					// Sanity: an invalid range (end before start) would underflow the ( range_end - range_start ) + 1 calculations later on.
+					if ( range_info->range_end < range_info->range_start )
+					{
+						range_info->range_start = 0;
+						range_info->range_end = 0;
+						range_info->content_length = 0;
+					}
 				}
 			}
 		}
@@ -5841,7 +5856,15 @@ char GetHTTPResponseContent( SOCKET_CONTEXT *context, char *response_buffer, uns
 
 			if ( context->header_info.range_info->content_offset >= ( ( context->header_info.range_info->range_end - context->header_info.range_info->range_start ) + 1 ) )
 			{
-				context->buffer[ context->header_info.range_info->content_length ] = 0;	// Sanity.
+				// The buffer is ( buffer_size + 1 ) bytes, so the NULL terminator at content_length must fit within it.
+				if ( context->header_info.range_info->content_length <= context->buffer_size )
+				{
+					context->buffer[ context->header_info.range_info->content_length ] = 0;	// Sanity.
+				}
+				else
+				{
+					return CONTENT_STATUS_FAILED;	// The response is too large for our buffer.
+				}
 
 				char *version_start_ptr = context->buffer;
 				char *version_end_ptr;

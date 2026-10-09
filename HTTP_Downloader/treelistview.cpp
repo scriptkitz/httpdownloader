@@ -5405,7 +5405,7 @@ LRESULT CALLBACK TreeListViewWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM
 									focused_index = g_first_visible_index + 1;
 								}
 							}
-							else if ( g_focused_index >= g_expanded_item_count || g_focused_index < ( g_visible_item_count - 1 ) || g_focused_index < g_first_visible_index )
+							else if ( g_focused_index >= g_expanded_item_count || g_focused_index >= ( g_first_visible_index + g_visible_item_count ) || g_focused_index < g_first_visible_index )
 							{
 								offset = 0;
 

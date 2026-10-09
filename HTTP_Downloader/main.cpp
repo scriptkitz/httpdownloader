@@ -359,8 +359,8 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 					cla->use_clipboard = true;
 				}
 				else if ( ( arg + 1 ) < argCount &&
-						  ( arg_name_length == 3 && _StrCmpNIW( arg_name, L"url", 3 ) == 0 ) ||
-						  ( arg_name_length == 12 && _StrCmpNIW( arg_name, L"header-field", 12 ) == 0 ) )	// A URL or header field was supplied.
+						  ( ( arg_name_length == 3 && _StrCmpNIW( arg_name, L"url", 3 ) == 0 ) ||
+						    ( arg_name_length == 12 && _StrCmpNIW( arg_name, L"header-field", 12 ) == 0 ) ) )	// A URL or header field was supplied.
 				{
 					wchar_t **cl_val = NULL;
 					int *cl_val_length = NULL;
@@ -407,15 +407,15 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 					}
 				}
 				else if ( ( arg + 1 ) < argCount &&
-						  ( arg_name_length == 8 && _StrCmpNIW( arg_name, L"comments", 8 ) == 0 ) ||
-						  ( arg_name_length == 13 && _StrCmpNIW( arg_name, L"cookie-string", 13 ) == 0 ) ||
-						  ( arg_name_length == 9 && _StrCmpNIW( arg_name, L"post-data", 9 ) == 0 ) ||
-						  ( arg_name_length == 8 && _StrCmpNIW( arg_name, L"category", 8 ) == 0 ) ||
-						  ( arg_name_length == 18 && _StrCmpNIW( arg_name, L"download-directory", 18 ) == 0 ) ||
-						  ( arg_name_length == 16 && _StrCmpNIW( arg_name, L"download-history", 16 ) == 0 ) ||
-						  ( arg_name_length == 8 && _StrCmpNIW( arg_name, L"url-list", 8 ) == 0 ) ||
-						  ( arg_name_length == 8 && _StrCmpNIW( arg_name, L"username", 8 ) == 0 ) ||
-						  ( arg_name_length == 8 && _StrCmpNIW( arg_name, L"password", 8 ) == 0 ) )	// A cookie string, form (POST) data, URL list file, output (download) directory, username, and or password was supplied.
+						  ( ( arg_name_length == 8 && _StrCmpNIW( arg_name, L"comments", 8 ) == 0 ) ||
+						    ( arg_name_length == 13 && _StrCmpNIW( arg_name, L"cookie-string", 13 ) == 0 ) ||
+						    ( arg_name_length == 9 && _StrCmpNIW( arg_name, L"post-data", 9 ) == 0 ) ||
+						    ( arg_name_length == 8 && _StrCmpNIW( arg_name, L"category", 8 ) == 0 ) ||
+						    ( arg_name_length == 18 && _StrCmpNIW( arg_name, L"download-directory", 18 ) == 0 ) ||
+						    ( arg_name_length == 16 && _StrCmpNIW( arg_name, L"download-history", 16 ) == 0 ) ||
+						    ( arg_name_length == 8 && _StrCmpNIW( arg_name, L"url-list", 8 ) == 0 ) ||
+						    ( arg_name_length == 8 && _StrCmpNIW( arg_name, L"username", 8 ) == 0 ) ||
+						    ( arg_name_length == 8 && _StrCmpNIW( arg_name, L"password", 8 ) == 0 ) ) )	// A cookie string, form (POST) data, URL list file, output (download) directory, username, and or password was supplied.
 				{
 					wchar_t **cl_val = NULL;
 
@@ -581,9 +581,9 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 					cla->proxy_resolve_domain_names = true;
 				}
 				else if ( ( arg + 1 ) < argCount &&
-						  ( arg_name_length == 14 && _StrCmpNIW( arg_name, L"proxy-hostname", 14 ) == 0 ) ||
-						  ( arg_name_length == 14 && _StrCmpNIW( arg_name, L"proxy-username", 14 ) == 0 ) ||
-						  ( arg_name_length == 14 && _StrCmpNIW( arg_name, L"proxy-password", 14 ) == 0 ) )	// Proxy hostname, username, and password.
+						  ( ( arg_name_length == 14 && _StrCmpNIW( arg_name, L"proxy-hostname", 14 ) == 0 ) ||
+						    ( arg_name_length == 14 && _StrCmpNIW( arg_name, L"proxy-username", 14 ) == 0 ) ||
+						    ( arg_name_length == 14 && _StrCmpNIW( arg_name, L"proxy-password", 14 ) == 0 ) ) )	// Proxy hostname, username, and password.
 				{
 					wchar_t **cl_val = NULL;
 
@@ -749,9 +749,9 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 	{
 		wchar_t dm_file_path[ MAX_PATH ];
 		_wmemcpy_s( dm_file_path, MAX_PATH, g_program_directory, g_program_directory_length );
-		g_base_directory_length = g_program_directory_length;
-		_wmemcpy_s( dm_file_path + g_base_directory_length, MAX_PATH - g_base_directory_length, L"\\dark_mode\0", 11 );
-		//dm_file_path[ g_base_directory_length + 10 ] = 0;	// Sanity.
+		int dm_file_path_length = g_program_directory_length;
+		_wmemcpy_s( dm_file_path + dm_file_path_length, MAX_PATH - dm_file_path_length, L"\\dark_mode\0", 11 );
+		//dm_file_path[ dm_file_path_length + 10 ] = 0;	// Sanity.
 
 		// See if the user wants to run the program with dark mode support.
 		if ( GetFileAttributesW( dm_file_path ) != INVALID_FILE_ATTRIBUTES )
@@ -930,8 +930,8 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 					unsigned int data_offset = 0;
 					unsigned int data_size = sizeof( CL_ARGS );
 					if ( cla->category_length > 0 ) { data_size += ( sizeof( wchar_t ) * ( cla->category_length + 1 ) ); }
-					if ( cla->download_directory > 0 ) { data_size += ( sizeof( wchar_t ) * ( cla->download_directory_length + 1 ) ); }
-					if ( cla->download_history_file > 0 ) { data_size += ( sizeof( wchar_t ) * ( cla->download_history_file_length + 1 ) ); }
+					if ( cla->download_directory_length > 0 ) { data_size += ( sizeof( wchar_t ) * ( cla->download_directory_length + 1 ) ); }
+					if ( cla->download_history_file_length > 0 ) { data_size += ( sizeof( wchar_t ) * ( cla->download_history_file_length + 1 ) ); }
 					if ( cla->comments_length > 0 ) { data_size += ( sizeof( wchar_t ) * ( cla->comments_length + 1 ) ); }
 					if ( cla->cookies_length > 0 ) { data_size += ( sizeof( wchar_t ) * ( cla->cookies_length + 1 ) ); }
 					if ( cla->headers_length > 0 ) { data_size += ( sizeof( wchar_t ) * ( cla->headers_length + 1 ) ); }

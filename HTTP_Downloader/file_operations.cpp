@@ -69,7 +69,8 @@ RETRY_OPEN:
 		int reserved;
 
 		// Our config file is going to be small. If it's something else, we're not going to read it.
-		if ( fz >= 1024 && fz < 10240 )
+		// 4 bytes for the magic identifier + 1024 bytes for the fixed layout.
+		if ( fz >= 1028 && fz < 10240 )
 		{
 			unsigned char magic_identifier[ 4 ];
 			BOOL bRet = ReadFile( hFile_cfg, magic_identifier, sizeof( unsigned char ) * 4, &read, NULL );

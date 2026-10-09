@@ -274,9 +274,10 @@ dllrbt_status dllrbt_insert( dllrbt_tree *tree, void *key, void *val )
 	// Allocate node for data and insert in tree, then find future parent
 	current = rbt->root;
 	parent = 0;
+	int rc = 0;	// The comparison result against the parent (reused below).
 	while ( current != &rbt->sentinel )
 	{
-		int rc = rbt->compare( key, current->key );
+		rc = rbt->compare( key, current->key );
 		if ( rc == 0 )
 		{
 			return DLLRBT_STATUS_DUPLICATE_KEY;
@@ -300,7 +301,7 @@ dllrbt_status dllrbt_insert( dllrbt_tree *tree, void *key, void *val )
 	// Insert node in tree
 	if ( parent )
 	{
-		if ( rbt->compare( key, parent->key ) < 0 )
+		if ( rc < 0 )
 		{
 			x->next = parent;
 			x->previous = parent->previous;

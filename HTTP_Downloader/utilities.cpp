@@ -431,7 +431,7 @@ int *download_columns_width[ NUM_COLUMNS ] = { &cfg_column_width1,
 
 HANDLE worker_semaphore = NULL;			// Blocks shutdown while a worker thread is active.
 bool in_worker_thread = false;
-bool kill_worker_thread_flag = false;	// Allow for a clean shutdown.
+volatile bool kill_worker_thread_flag = false;	// Allow for a clean shutdown.
 
 bool g_download_history_changed = false;
 
@@ -1129,8 +1129,23 @@ int GetTemporaryFilePath( DOWNLOAD_INFO *di, wchar_t file_path[] )
 
 		_wmemcpy_s( file_path, MAX_PATH, cfg_temp_download_directory, g_temp_download_directory_length );
 		file_path[ g_temp_download_directory_length ] = L'\\';	// Replace the download directory NULL terminator with a directory slash.
-		_wmemcpy_s( file_path + ( g_temp_download_directory_length + 1 ), MAX_PATH - ( g_temp_download_directory_length - 1 ), di->shared_info->file_path + di->shared_info->filename_offset, filename_length );
-		file_path[ g_temp_download_directory_length + filename_length + 1 ] = 0;	// Sanity.
+
+		// The space left for the filename must reserve one character for the NULL terminator.
+		int remaining = MAX_PATH - ( ( int )g_temp_download_directory_length + 1 );
+		if ( remaining > 0 )
+		{
+			if ( filename_length >= remaining )
+			{
+				filename_length = remaining - 1;	// Truncate so we don't write out of bounds.
+			}
+
+			_wmemcpy_s( file_path + ( g_temp_download_directory_length + 1 ), remaining, di->shared_info->file_path + di->shared_info->filename_offset, filename_length );
+			file_path[ g_temp_download_directory_length + filename_length + 1 ] = 0;	// Sanity.
+		}
+		else
+		{
+			file_path[ g_temp_download_directory_length ] = 0;	// Sanity. No room left for the filename.
+		}
 	}
 
 	return filename_length;
@@ -3065,16 +3080,25 @@ void GetDownloadStatus( char *buf, unsigned short buf_size, unsigned int status 
 
 		if ( val != NULL )
 		{
-			if ( offset > 0 )
+			if ( offset > 0 && ( offset + 1 ) < buf_size )
 			{
 				buf[ offset++ ] = ',';
 				buf[ offset++ ] = ' ';
 			}
 
-			unsigned char val_length = ( unsigned char )lstrlenA( val );
-			_memcpy_s( buf + offset, buf_size - offset, val, val_length );
+			// Reserve the last byte for the NULL terminator.
+			if ( offset < buf_size )
+			{
+				unsigned char val_length = ( unsigned char )lstrlenA( val );
+				if ( ( unsigned int )val_length > ( buf_size - offset - 1 ) )
+				{
+					val_length = ( unsigned char )( buf_size - offset - 1 );
+				}
 
-			offset += val_length;
+				_memcpy_s( buf + offset, buf_size - offset, val, val_length );
+
+				offset += val_length;
+			}
 
 			buf[ offset ] = 0;	// Sanity.
 		}
