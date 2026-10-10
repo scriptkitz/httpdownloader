@@ -23,6 +23,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+// See lite_libssl.h. The program loads libcrypto at runtime, so we only need
+// forward declarations unless USE_OPENSSL_HEADERS is defined.
+#ifdef USE_OPENSSL_HEADERS
+
 #pragma push_macro( "_MSC_VER" )
 #undef _MSC_VER
 #define _MSC_VER 1600	// We have stdint.h, so make e_os2.h think we're an older version (VS 2010+).
@@ -32,6 +36,14 @@
 #include <openssl/pkcs12.h>
 #include <openssl/evp.h>
 #include <openssl/x509.h>
+
+#else
+
+#include "lite_libssl.h"
+
+typedef struct pkcs12_st PKCS12;
+
+#endif // USE_OPENSSL_HEADERS
 
 //#define LIBCRYPTO_USE_STATIC_LIB
 

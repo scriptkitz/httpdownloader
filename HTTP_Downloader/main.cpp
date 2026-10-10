@@ -950,98 +950,98 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 
 					wchar_t *wbyte_buf = ( wchar_t * )( ( char * )cla_data + sizeof( CL_ARGS ) );
 
-					cla_data->category = ( wchar_t * )data_offset;
+					cla_data->category = ( wchar_t * )( ULONG_PTR )data_offset;
 					if ( cla->category_length > 0 )
 					{
 						_wmemcpy_s( wbyte_buf + data_offset, data_size - data_offset, cla->category, cla->category_length + 1 );
 						data_offset += ( cla->category_length + 1 );
 					}
 
-					cla_data->download_directory = ( wchar_t * )data_offset;
+					cla_data->download_directory = ( wchar_t * )( ULONG_PTR )data_offset;
 					if ( cla->download_directory_length > 0 )
 					{
 						_wmemcpy_s( wbyte_buf + data_offset, data_size - data_offset, cla->download_directory, cla->download_directory_length + 1 );
 						data_offset += ( cla->download_directory_length + 1 );
 					}
 
-					cla_data->download_history_file = ( wchar_t * )data_offset;
+					cla_data->download_history_file = ( wchar_t * )( ULONG_PTR )data_offset;
 					if ( cla->download_history_file_length > 0 )
 					{
 						_wmemcpy_s( wbyte_buf + data_offset, data_size - data_offset, cla->download_history_file, cla->download_history_file_length + 1 );
 						data_offset += ( cla->download_history_file_length + 1 );
 					}
 
-					cla_data->url_list_file = ( wchar_t * )data_offset;
+					cla_data->url_list_file = ( wchar_t * )( ULONG_PTR )data_offset;
 					if ( cla->url_list_file_length > 0 )
 					{
 						_wmemcpy_s( wbyte_buf + data_offset, data_size - data_offset, cla->url_list_file, cla->url_list_file_length + 1 );
 						data_offset += ( cla->url_list_file_length + 1 );
 					}
 
-					cla_data->urls = ( wchar_t * )data_offset;
+					cla_data->urls = ( wchar_t * )( ULONG_PTR )data_offset;
 					if ( cla->urls_length > 0 )
 					{
 						_wmemcpy_s( wbyte_buf + data_offset, data_size - data_offset, cla->urls, cla->urls_length + 1 );
 						data_offset += ( cla->urls_length + 1 );
 					}
 
-					cla_data->comments = ( wchar_t * )data_offset;
+					cla_data->comments = ( wchar_t * )( ULONG_PTR )data_offset;
 					if ( cla->comments_length > 0 )
 					{
 						_wmemcpy_s( wbyte_buf + data_offset, data_size - data_offset, cla->comments, cla->comments_length + 1 );
 						data_offset += ( cla->comments_length + 1 );
 					}
 
-					cla_data->cookies = ( wchar_t * )data_offset;
+					cla_data->cookies = ( wchar_t * )( ULONG_PTR )data_offset;
 					if ( cla->cookies_length > 0 )
 					{
 						_wmemcpy_s( wbyte_buf + data_offset, data_size - data_offset, cla->cookies, cla->cookies_length + 1 );
 						data_offset += ( cla->cookies_length + 1 );
 					}
 
-					cla_data->headers = ( wchar_t * )data_offset;
+					cla_data->headers = ( wchar_t * )( ULONG_PTR )data_offset;
 					if ( cla->headers_length > 0 )
 					{
 						_wmemcpy_s( wbyte_buf + data_offset, data_size - data_offset, cla->headers, cla->headers_length + 1 );
 						data_offset += ( cla->headers_length + 1 );
 					}
 
-					cla_data->data = ( wchar_t * )data_offset;
+					cla_data->data = ( wchar_t * )( ULONG_PTR )data_offset;
 					if ( cla->data_length > 0 )
 					{
 						_wmemcpy_s( wbyte_buf + data_offset, data_size - data_offset, cla->data, cla->data_length + 1 );
 						data_offset += ( cla->data_length + 1 );
 					}
 
-					cla_data->username = ( wchar_t * )data_offset;
+					cla_data->username = ( wchar_t * )( ULONG_PTR )data_offset;
 					if ( cla->username_length > 0 )
 					{
 						_wmemcpy_s( wbyte_buf + data_offset, data_size - data_offset, cla->username, cla->username_length + 1 );
 						data_offset += ( cla->username_length + 1 );
 					}
 
-					cla_data->password = ( wchar_t * )data_offset;
+					cla_data->password = ( wchar_t * )( ULONG_PTR )data_offset;
 					if ( cla->password_length > 0 )
 					{
 						_wmemcpy_s( wbyte_buf + data_offset, data_size - data_offset, cla->password, cla->password_length + 1 );
 						data_offset += ( cla->password_length + 1 );
 					}
 
-					cla_data->proxy_hostname = ( wchar_t * )data_offset;
+					cla_data->proxy_hostname = ( wchar_t * )( ULONG_PTR )data_offset;
 					if ( cla->proxy_hostname_length > 0 )
 					{
 						_wmemcpy_s( wbyte_buf + data_offset, data_size - data_offset, cla->proxy_hostname, cla->proxy_hostname_length + 1 );
 						data_offset += ( cla->proxy_hostname_length + 1 );
 					}
 
-					cla_data->proxy_username = ( wchar_t * )data_offset;
+					cla_data->proxy_username = ( wchar_t * )( ULONG_PTR )data_offset;
 					if ( cla->proxy_username_length > 0 )
 					{
 						_wmemcpy_s( wbyte_buf + data_offset, data_size - data_offset, cla->proxy_username, cla->proxy_username_length + 1 );
 						data_offset += ( cla->proxy_username_length + 1 );
 					}
 
-					cla_data->proxy_password = ( wchar_t * )data_offset;
+					cla_data->proxy_password = ( wchar_t * )( ULONG_PTR )data_offset;
 					if ( cla->proxy_password_length > 0 )
 					{
 						_wmemcpy_s( wbyte_buf + data_offset, data_size - data_offset, cla->proxy_password, cla->proxy_password_length + 1 );

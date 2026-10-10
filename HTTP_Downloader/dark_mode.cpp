@@ -165,7 +165,7 @@ DWORD LBS_DARK_MODE = 0;
 
 DWORD g_dm_buildNumber = 0;
 
-DWORD DWMWA_USE_IMMERSIVE_DARK_MODE = 0;	// 19 for builds before 20H1, 20 for builds after.
+DWORD DM_DWMWA_USE_IMMERSIVE_DARK_MODE = 0;	// 19 for builds before 20H1, 20 for builds after. (Avoids a clash with the DWMWA_USE_IMMERSIVE_DARK_MODE enumerator in newer SDKs.)
 
 HTHEME g_hTheme_menu = NULL;
 HBRUSH g_hBrush_window_background = NULL;
@@ -345,11 +345,11 @@ LRESULT CALLBACK DMListBoxSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 
 			UINT current_dpi_dark_mode = ( UINT )_SendMessageW( hWnd_parent, WM_GET_DPI, 0, 0 );
 			
-			UINT last_dpi_dark_mode = ( UINT )_GetPropW( hWnd, L"DPI" );
+			UINT last_dpi_dark_mode = ( UINT )( ULONG_PTR )_GetPropW( hWnd, L"DPI" );
 
 			if ( current_dpi_dark_mode != 0 && last_dpi_dark_mode != 0 && current_dpi_dark_mode != last_dpi_dark_mode )
 			{
-				_SetPropW( hWnd, L"DPI", ( HANDLE )current_dpi_dark_mode );
+				_SetPropW( hWnd, L"DPI", ( HANDLE )( ULONG_PTR )current_dpi_dark_mode );
 
 				int height = ( int )_SendMessageW( hWnd, LB_GETITEMHEIGHT, 0, 0 );
 				if ( height != LB_ERR )
@@ -592,7 +592,7 @@ void CBRBPaint( HWND hWnd, HDC hDC, COLORREF text_color, int draw_state )
 		unsigned char glyph_type = ( unsigned char )_GetPropW( hWnd_parent, L"GLYPH_TYPE" );
 		if ( glyph_type == 0 )
 		{
-			LONG height_width = ( LONG )_GetPropW( hWnd_parent, L"GLYPH_HW" );
+			LONG height_width = ( LONG )( ULONG_PTR )_GetPropW( hWnd_parent, L"GLYPH_HW" );
 
 			// Vertically center the button.
 			_ImageList_Draw( ( HIMAGELIST )glyphs, draw_state, hdcMem, client_rc.left, client_rc.top + ( ( height - height_width ) / 2 ), 0 );
@@ -722,7 +722,7 @@ LRESULT CALLBACK DMCBRBSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 			// Only update if it's visible.
 			if ( _IsWindowVisible( hWnd ) != FALSE )
 			{
-				DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+				DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 				if ( wParam == FALSE )
 				{
@@ -733,7 +733,7 @@ LRESULT CALLBACK DMCBRBSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 					state |= 0x20;	// Was disabled.
 				}
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x100 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x100 ) );
 
 				_InvalidateRect( hWnd, NULL, TRUE );
 			}
@@ -747,14 +747,14 @@ LRESULT CALLBACK DMCBRBSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 			// Make sure that our button has changed states so that we can update it.
 			if ( ( UINT_PTR )_SendMessageW( hWnd, BM_GETCHECK, 0, 0 ) != wParam )
 			{
-				DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+				DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 				if ( wParam == BST_UNCHECKED )
 				{
 					state |= 0x40;	// Was checked
 				}
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x100 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x100 ) );
 
 				_InvalidateRect( hWnd, NULL, TRUE );
 			}
@@ -765,7 +765,7 @@ LRESULT CALLBACK DMCBRBSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 		case WM_SETFOCUS:
 		case WM_SETTEXT:	// Occurs when changing proxy types.
 		{
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( ( DWORD )_GetPropW( hWnd, L"STATE" ) | 0x100 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" ) | 0x100 ) );
 
 			_InvalidateRect( hWnd, NULL, TRUE );
 		}
@@ -781,14 +781,14 @@ LRESULT CALLBACK DMCBRBSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 			}
 			else
 			{
-				state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+				state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 				state &= ~0x04;		// Unset the hovered state.
 
 				state &= ~0x80;		// Not in bounds.
 			}
 
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x100 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x100 ) );
 
 			_InvalidateRect( hWnd, NULL, TRUE );
 		}
@@ -797,11 +797,11 @@ LRESULT CALLBACK DMCBRBSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 		case WM_LBUTTONDBLCLK:
 		case WM_LBUTTONDOWN:
 		{
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			state |= 0x08;	// Set the down state.
 
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x100 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x100 ) );
 
 			_InvalidateRect( hWnd, NULL, TRUE );
 		}
@@ -810,13 +810,13 @@ LRESULT CALLBACK DMCBRBSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 		case WM_CAPTURECHANGED:
 		case WM_LBUTTONUP:
 		{
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			if ( state & 0x08 )
 			{
 				state &= ~0x08;	// Unset the down state.
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x100 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x100 ) );
 
 				_InvalidateRect( hWnd, NULL, TRUE );
 			}
@@ -834,7 +834,7 @@ LRESULT CALLBACK DMCBRBSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 			int width = ( client_rc.right - client_rc.left );
 			int height = ( client_rc.bottom - client_rc.top );
 
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 			DWORD old_state = state;
 
 			bool bounds_changed = false;
@@ -866,7 +866,7 @@ LRESULT CALLBACK DMCBRBSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 			if ( state != old_state )
 			{
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x100 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x100 ) );
 
 				_InvalidateRect( hWnd, NULL, TRUE );
 			}
@@ -879,11 +879,11 @@ LRESULT CALLBACK DMCBRBSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 			UINT current_dpi_dark_mode = ( UINT )_SendMessageW( hWnd_parent, WM_GET_DPI, 0, 0 );
 			
-			UINT last_dpi_dark_mode = ( UINT )_GetPropW( hWnd, L"DPI" );
+			UINT last_dpi_dark_mode = ( UINT )( ULONG_PTR )_GetPropW( hWnd, L"DPI" );
 
 			if ( current_dpi_dark_mode != 0 && last_dpi_dark_mode != 0 && current_dpi_dark_mode != last_dpi_dark_mode )
 			{
-				_SetPropW( hWnd, L"DPI", ( HANDLE )current_dpi_dark_mode );
+				_SetPropW( hWnd, L"DPI", ( HANDLE )( ULONG_PTR )current_dpi_dark_mode );
 
 				HANDLE glyphs = _GetPropW( hWnd_parent, L"GLYPHS" );
 
@@ -901,7 +901,7 @@ LRESULT CALLBACK DMCBRBSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 				HIMAGELIST hIL = UpdateButtonGlyphs( hWnd, &height_width );
 				if ( hIL != NULL )
 				{
-					_SetPropW( hWnd_parent, L"GLYPH_HW", ( HANDLE )height_width );
+					_SetPropW( hWnd_parent, L"GLYPH_HW", ( HANDLE )( ULONG_PTR )height_width );
 
 					_SetPropW( hWnd_parent, L"GLYPHS", ( HANDLE )hIL );
 
@@ -923,10 +923,10 @@ LRESULT CALLBACK DMCBRBSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 		case WM_ERASEBKGND:
 		{
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 			if ( state == 0 )
 			{
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x100 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x100 ) );
 			}
 
 			// We'll handle the background drawing.
@@ -939,7 +939,7 @@ LRESULT CALLBACK DMCBRBSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 			PAINTSTRUCT ps;
 			HDC hDC = _BeginPaint( hWnd, &ps );
 
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			if ( !_BufferedPaintRenderAnimation( hWnd, hDC ) && ( state & 0x100 ) )
 			{
@@ -1079,7 +1079,7 @@ LRESULT CALLBACK DMCBRBSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 					draw_state2 += ( GLYPH_RB_UNCHECKED_NORMAL - 1 );
 				}
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )state );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )state );
 
 				if ( draw_state1 != draw_state2 || text_color1 != text_color2 )
 				{
@@ -1369,7 +1369,7 @@ LRESULT CALLBACK DMUDSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 			// Only update if it's visible.
 			if ( _IsWindowVisible( hWnd ) != FALSE )
 			{
-				DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+				DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 				if ( wParam == FALSE )
 				{
@@ -1380,7 +1380,7 @@ LRESULT CALLBACK DMUDSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 					state |= 0x800;	// Was disabled.
 				}
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x1000 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x1000 ) );
 
 				_InvalidateRect( hWnd, NULL, TRUE );
 			}
@@ -1391,7 +1391,7 @@ LRESULT CALLBACK DMUDSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 
 		case WM_WINDOWPOSCHANGED:
 		{
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( ( DWORD )_GetPropW( hWnd, L"STATE" ) | 0x1000 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" ) | 0x1000 ) );
 
 			_InvalidateRect( hWnd, NULL, TRUE );
 
@@ -1401,13 +1401,13 @@ LRESULT CALLBACK DMUDSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 
 		case WM_LBUTTONUP:
 		{
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			state &= ~0x08;		// Unset the down state.
 
 			state &= ~0x80;		// Unset the down state.
 
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x1000 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x1000 ) );
 
 			_InvalidateRect( hWnd, NULL, TRUE );
 		}
@@ -1422,7 +1422,7 @@ LRESULT CALLBACK DMUDSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 
 			int height = ( client_rc.bottom - client_rc.top ) / 2;
 
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			if ( yPos < height )	// Button 1 down, button 2 up
 			{
@@ -1440,7 +1440,7 @@ LRESULT CALLBACK DMUDSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 				state &= ~0x80;		// Unset the down state.
 			}
 
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x1000 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x1000 ) );
 
 			_InvalidateRect( hWnd, NULL, TRUE );
 		}
@@ -1456,7 +1456,7 @@ LRESULT CALLBACK DMUDSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 			}
 			else
 			{
-				state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+				state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 				state &= ~0x04;			// Unset the hovered state.
 
@@ -1472,7 +1472,7 @@ LRESULT CALLBACK DMUDSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 				}
 			}
 
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x1000 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x1000 ) );
 
 			_InvalidateRect( hWnd, NULL, TRUE );
 		}
@@ -1490,7 +1490,7 @@ LRESULT CALLBACK DMUDSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 			int height = ( client_rc.bottom - client_rc.top );
 			int button_height = height / 2;
 
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 			DWORD old_state = state;
 
 			if ( xPos >= 0 && xPos <= width && yPos >= 0 && yPos <= height )
@@ -1539,7 +1539,7 @@ LRESULT CALLBACK DMUDSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 
 			if ( state != old_state )
 			{
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x1000 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x1000 ) );
 
 				_InvalidateRect( hWnd, NULL, TRUE );
 			}
@@ -1548,10 +1548,10 @@ LRESULT CALLBACK DMUDSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 
 		case WM_ERASEBKGND:
 		{
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 			if ( state == 0 )
 			{
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x1000 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x1000 ) );
 			}
 
 			// We'll handle the background drawing.
@@ -1564,7 +1564,7 @@ LRESULT CALLBACK DMUDSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 			PAINTSTRUCT ps;
 			HDC hDC = _BeginPaint( hWnd, &ps );
 
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			if ( !_BufferedPaintRenderAnimation( hWnd, hDC ) && ( state & 0x1000 ) )
 			{
@@ -1744,7 +1744,7 @@ LRESULT CALLBACK DMUDSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 					border_color1 = border_color2;
 				}
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )state );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )state );
 
 				if ( was_in_bounds || was_enabled || was_disabled || buttons[ 0 ] != buttons[ 1 ] || buttons[ 2 ] != buttons[ 3 ] )
 				{
@@ -1965,7 +1965,7 @@ LRESULT CALLBACK DMComboBoxSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 			// Only update if it's visible.
 			if ( _IsWindowVisible( hWnd ) != FALSE )
 			{
-				DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+				DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 				if ( wParam == FALSE )
 				{
@@ -1976,7 +1976,7 @@ LRESULT CALLBACK DMComboBoxSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 					state |= 0x20;	// Was disabled.
 				}
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x100 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x100 ) );
 
 				_InvalidateRect( hWnd, NULL, TRUE );
 			}
@@ -1991,7 +1991,7 @@ LRESULT CALLBACK DMComboBoxSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 		{
 			_BufferedPaintStopAllAnimations( hWnd );
 
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( ( DWORD )_GetPropW( hWnd, L"STATE" ) | 0x100 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" ) | 0x100 ) );
 
 			_InvalidateRect( hWnd, NULL, TRUE );
 		}
@@ -2002,7 +2002,7 @@ LRESULT CALLBACK DMComboBoxSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 			LONG_PTR style = _GetWindowLongPtrW( hWnd, GWL_STYLE );
 			if ( ( style & 0x0000000F ) != CBS_DROPDOWN )
 			{
-				DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+				DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 				// This condition handles the case where the control is focused and we switch to a different tab.
 				// If we switch back, the previously focused control would have animated. We don't want that to happen.
@@ -2011,14 +2011,14 @@ LRESULT CALLBACK DMComboBoxSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 					state |= 0x40;	// Was focused.
 				}
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x100 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x100 ) );
 			}
 		}
 		break;
 
 		case WM_WINDOWPOSCHANGED:
 		{
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( ( DWORD )_GetPropW( hWnd, L"STATE" ) | 0x100 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" ) | 0x100 ) );
 
 			_InvalidateRect( hWnd, NULL, TRUE );
 
@@ -2034,7 +2034,7 @@ LRESULT CALLBACK DMComboBoxSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 				{
 					_BufferedPaintStopAllAnimations( hWnd );
 
-					DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+					DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 					// This condition handles the case where the control is focused and we switch to a different tab.
 					// If we switch back, the previously focused control would have animated. We don't want that to happen.
@@ -2043,7 +2043,7 @@ LRESULT CALLBACK DMComboBoxSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 						state |= 0x40;	// Was focused.
 					}
 
-					_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x100 ) );
+					_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x100 ) );
 				}
 				break;
 
@@ -2065,7 +2065,7 @@ LRESULT CALLBACK DMComboBoxSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 
 		case WM_WINDOWPOSCHANGING:
 		{
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			if ( state & 0x08 )
 			{
@@ -2084,7 +2084,7 @@ LRESULT CALLBACK DMComboBoxSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 
 			state &= ~0x08;		// Unset the down state.
 
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x100 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x100 ) );
 
 			_InvalidateRect( hWnd, NULL, TRUE );
 		}
@@ -2100,13 +2100,13 @@ LRESULT CALLBACK DMComboBoxSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 
 			if ( pt.x <= rc.left || pt.x >= rc.right || pt.y <= rc.top || pt.y >= rc.bottom )
 			{
-				DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+				DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 				state &= ~0x04;		// Unset the hovered state.
 
 				state &= ~0x08;		// Unset the down state.
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x100 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x100 ) );
 
 				_InvalidateRect( hWnd, NULL, TRUE );
 			}
@@ -2119,11 +2119,11 @@ LRESULT CALLBACK DMComboBoxSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 
 		case WM_LBUTTONDOWN:
 		{
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			state ^= 0x08;	// Set/Unset the down state.
 
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x100 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x100 ) );
 
 			_InvalidateRect( hWnd, NULL, TRUE );
 		}
@@ -2131,14 +2131,14 @@ LRESULT CALLBACK DMComboBoxSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 
 		case WM_MOUSEMOVE:
 		{
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			// Is it currently hovered?
 			if ( !( state & 0x04 ) )
 			{
 				state |= 0x04;	// Set the hovered state.
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x100 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x100 ) );
 
 				_InvalidateRect( hWnd, NULL, TRUE );
 			}
@@ -2151,11 +2151,11 @@ LRESULT CALLBACK DMComboBoxSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 
 			UINT current_dpi_dark_mode = ( UINT )_SendMessageW( hWnd_parent, WM_GET_DPI, 0, 0 );
 			
-			UINT last_dpi_dark_mode = ( UINT )_GetPropW( hWnd, L"DPI" );
+			UINT last_dpi_dark_mode = ( UINT )( ULONG_PTR )_GetPropW( hWnd, L"DPI" );
 
 			if ( current_dpi_dark_mode != 0 && last_dpi_dark_mode != 0 && current_dpi_dark_mode != last_dpi_dark_mode )
 			{
-				_SetPropW( hWnd, L"DPI", ( HANDLE )current_dpi_dark_mode );
+				_SetPropW( hWnd, L"DPI", ( HANDLE )( ULONG_PTR )current_dpi_dark_mode );
 
 				int height = ( int )_SendMessageW( hWnd, CB_GETITEMHEIGHT, ( WPARAM )-1, 0 );
 				if ( height != CB_ERR )
@@ -2174,11 +2174,11 @@ LRESULT CALLBACK DMComboBoxSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 
 		case WM_ERASEBKGND:
 		{
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			if ( state == 0 )
 			{
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x100 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x100 ) );
 			}
 
 			// We'll handle the background drawing.
@@ -2191,7 +2191,7 @@ LRESULT CALLBACK DMComboBoxSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 			PAINTSTRUCT ps;
 			HDC hDC = _BeginPaint( hWnd, &ps );
 
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			if ( !_BufferedPaintRenderAnimation( hWnd, hDC ) && ( state & 0x100 ) )
 			{
@@ -2457,7 +2457,7 @@ LRESULT CALLBACK DMComboBoxSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 					text_color2 = _GetSysColor( COLOR_GRAYTEXT );
 				}
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )state );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )state );
 
 				BP_ANIMATIONPARAMS animParams;
 				_memzero( &animParams, sizeof( animParams ) );
@@ -2590,7 +2590,7 @@ LRESULT CALLBACK DMIPSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 			// Only update if it's visible.
 			if ( _IsWindowVisible( hWnd ) != FALSE )
 			{
-				DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+				DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 				if ( wParam == FALSE )
 				{
@@ -2601,7 +2601,7 @@ LRESULT CALLBACK DMIPSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 					state |= 0x10;	// Was disabled.
 				}
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x40 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x40 ) );
 
 				_InvalidateRect( hWnd, NULL, TRUE );	// Updates the dots.
 
@@ -2725,10 +2725,10 @@ LRESULT CALLBACK DMIPSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 			_DeleteDC( hdcMem );
 			_EndPaint( hWnd, &ps );
 
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 			if ( state == 0 )
 			{
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x40 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x40 ) );
 			}
 
 			return 0;
@@ -2746,7 +2746,7 @@ LRESULT CALLBACK DMIPSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 					{
 						_BufferedPaintStopAllAnimations( hWnd );
 
-						DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+						DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 						// This condition handles the case where the control is focused and we switch to a different tab.
 						// If we switch back, the previously focused control would have animated. We don't want that to happen.
@@ -2755,7 +2755,7 @@ LRESULT CALLBACK DMIPSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 							state |= 0x20;	// Was focused.
 						}
 
-						_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x40 ) );
+						_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x40 ) );
 
 						//_RedrawWindow( hWnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_NOCHILDREN | RDW_ERASENOW );
 						_SetWindowPos( hWnd, NULL, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER );
@@ -2768,7 +2768,7 @@ LRESULT CALLBACK DMIPSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 					HWND focused_hWnd = ( HWND )lParam;
 					if ( _GetParent( focused_hWnd ) != hWnd )
 					{
-						_SetPropW( hWnd, L"STATE", ( HANDLE )( ( DWORD )_GetPropW( hWnd, L"STATE" ) | 0x40 ) );
+						_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" ) | 0x40 ) );
 
 						//_RedrawWindow( hWnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_NOCHILDREN | RDW_ERASENOW );
 						_SetWindowPos( hWnd, NULL, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER );
@@ -2784,7 +2784,7 @@ LRESULT CALLBACK DMIPSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 
 				case WM_MOUSEMOVE:
 				{
-					DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+					DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 					// Is it currently hovered?
 					if ( !( state & 0x04 ) )
@@ -2792,7 +2792,7 @@ LRESULT CALLBACK DMIPSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 						state |= 0x04;	// Set the hovered state.
 
 						// We're going to update.
-						_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x40 ) );
+						_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x40 ) );
 
 						//_RedrawWindow( hWnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_NOCHILDREN | RDW_ERASENOW );
 						_SetWindowPos( hWnd, NULL, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER );
@@ -2817,11 +2817,11 @@ LRESULT CALLBACK DMIPSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 			{
 				_BufferedPaintStopAllAnimations( hWnd );
 
-				DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+				DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 				state &= ~0x04;		// Unset the hovered state.
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x40 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x40 ) );
 
 				//_RedrawWindow( hWnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_NOCHILDREN | RDW_ERASENOW );
 				_SetWindowPos( hWnd, NULL, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER );
@@ -2846,14 +2846,14 @@ LRESULT CALLBACK DMIPSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 				tmi.hwndTrack = hWnd;
 				_TrackMouseEvent( &tmi );
 
-				DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+				DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 				// Is it currently hovered?
 				if ( !( state & 0x04 ) )
 				{
 					state |= 0x04;	// Set the hovered state.
 
-					_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x40 ) );
+					_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x40 ) );
 
 					//_RedrawWindow( hWnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_NOCHILDREN | RDW_ERASENOW );
 					_SetWindowPos( hWnd, NULL, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER );
@@ -2887,7 +2887,7 @@ LRESULT CALLBACK DMIPSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 
 		case WM_ERASEBKGND:
 		{
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( ( DWORD )_GetPropW( hWnd, L"STATE" ) | 0x40 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" ) | 0x40 ) );
 		}
 		break;
 
@@ -2895,7 +2895,7 @@ LRESULT CALLBACK DMIPSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 		{
 			HDC hDC = _GetWindowDC( hWnd );
 
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			if ( !_BufferedPaintRenderAnimation( hWnd, hDC ) && ( state & 0x40 ) )
 			{
@@ -3040,7 +3040,7 @@ LRESULT CALLBACK DMIPSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 					border_color1 = dm_color_edit_border_disabled;
 				}
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )state );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )state );
 
 				//if ( was_enabled || was_disabled || border_color1 != border_color2 )
 				{
@@ -3273,11 +3273,11 @@ LRESULT CALLBACK DMTreeViewSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 
 				UINT current_dpi_dark_mode = ( UINT )_SendMessageW( hWnd_parent, WM_GET_DPI, 0, 0 );
 				
-				UINT last_dpi_dark_mode = ( UINT )_GetPropW( hWnd, L"DPI" );
+				UINT last_dpi_dark_mode = ( UINT )( ULONG_PTR )_GetPropW( hWnd, L"DPI" );
 
 				if ( current_dpi_dark_mode != 0 && last_dpi_dark_mode != 0 && current_dpi_dark_mode != last_dpi_dark_mode )
 				{
-					_SetPropW( hWnd, L"DPI", ( HANDLE )current_dpi_dark_mode );
+					_SetPropW( hWnd, L"DPI", ( HANDLE )( ULONG_PTR )current_dpi_dark_mode );
 
 					HIMAGELIST hIL = ( HIMAGELIST )_SendMessageW( hWnd, TVM_GETIMAGELIST, TVSIL_STATE, 0 );
 					if ( hIL != NULL )
@@ -3592,7 +3592,7 @@ LRESULT CALLBACK DMControlColorSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPAR
 					LONG_PTR style = _GetWindowLongPtrW( hWnd, GWL_STYLE );
 					if ( ( style & 0x0000000F ) != CBS_DROPDOWN )
 					{
-						/*DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+						/*DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 						//bool color_state1 = ( state & 0x01 ? true : false );	// hovered
 						//bool color_state2 = ( state & 0x02 ? true : false );	// down
@@ -4259,7 +4259,7 @@ LRESULT CALLBACK DMToolbarSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 		case WM_WINDOWPOSCHANGING:
 		case TB_SETBUTTONINFOW:
 		{
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( ( DWORD )_GetPropW( hWnd, L"STATE" ) | 0x20 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" ) | 0x20 ) );
 
 			_InvalidateRect( hWnd, NULL, TRUE );
 		}
@@ -4280,7 +4280,7 @@ LRESULT CALLBACK DMToolbarSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 				_SendMessageW( g_hWnd_toolbar_tooltip, TTM_TRACKACTIVATE, FALSE, ( LPARAM )&tti );
 			}
 
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			state &= ~0x04;		// Unset the hovered state.
 
@@ -4288,7 +4288,7 @@ LRESULT CALLBACK DMToolbarSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 
 			state |= 0x10;		// Index changed.
 
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x20 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x20 ) );
 
 			_InvalidateRect( hWnd, NULL, TRUE );
 		}
@@ -4300,14 +4300,14 @@ LRESULT CALLBACK DMToolbarSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 			int hot_index = ( int )_SendMessageW( hWnd, TB_GETHOTITEM, 0, 0 );
 			if ( hot_index != -1 )
 			{
-				DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+				DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 				state |= 0x08;	// Set the down state.
 
 				state &= 0x00FFFF;
 				state |= ( ( unsigned char )hot_index << 16 );	// Set the current selected index.
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x20 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x20 ) );
 
 				_InvalidateRect( hWnd, NULL, TRUE );
 			}
@@ -4319,7 +4319,7 @@ LRESULT CALLBACK DMToolbarSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 			int hot_index = ( int )_SendMessageW( hWnd, TB_GETHOTITEM, 0, 0 );
 			if ( hot_index != -1 )
 			{
-				DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+				DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 				if ( state & 0x08 )
 				{
@@ -4327,7 +4327,7 @@ LRESULT CALLBACK DMToolbarSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 
 					state |= 0xFF0000;	// Unset the current selected index.
 
-					_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x20 ) );
+					_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x20 ) );
 
 					_InvalidateRect( hWnd, NULL, TRUE );
 				}
@@ -4337,7 +4337,7 @@ LRESULT CALLBACK DMToolbarSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 
 		case WM_MOUSEMOVE:
 		{
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 			DWORD old_state = state;
 
 			int hot_index = ( int )_SendMessageW( hWnd, TB_GETHOTITEM, 0, 0 );
@@ -4407,7 +4407,7 @@ LRESULT CALLBACK DMToolbarSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 
 			if ( state != old_state )
 			{
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x20 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x20 ) );
 
 				_InvalidateRect( hWnd, NULL, TRUE );
 			}
@@ -4416,11 +4416,11 @@ LRESULT CALLBACK DMToolbarSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 
 		case WM_ERASEBKGND:
 		{
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			if ( state == 0 )
 			{
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x20 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x20 ) );
 			}
 
 			// We'll handle the background drawing.
@@ -4430,7 +4430,7 @@ LRESULT CALLBACK DMToolbarSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 
 		case WM_NCPAINT:
 		{
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( ( DWORD )_GetPropW( hWnd, L"STATE" ) | 0x20 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" ) | 0x20 ) );
 		}
 		break;
 
@@ -4439,7 +4439,7 @@ LRESULT CALLBACK DMToolbarSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 			PAINTSTRUCT ps;
 			HDC hDC = _BeginPaint( hWnd, &ps );
 
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			if ( !_BufferedPaintRenderAnimation( hWnd, hDC ) && ( state & 0x20 ) )
 			{
@@ -4540,7 +4540,7 @@ LRESULT CALLBACK DMToolbarSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 					}
 				}
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )state );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )state );
 
 				BP_ANIMATIONPARAMS animParams;
 				_memzero( &animParams, sizeof( animParams ) );
@@ -4643,7 +4643,7 @@ LRESULT CALLBACK DMEditSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 			// Only update if it's visible.
 			if ( _IsWindowVisible( hWnd ) != FALSE )
 			{
-				DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+				DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 				if ( wParam == FALSE )
 				{
@@ -4654,7 +4654,7 @@ LRESULT CALLBACK DMEditSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 					state |= 0x10;	// Was disabled.
 				}
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x40 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x40 ) );
 			}
 
 			// Don't return here.
@@ -4663,7 +4663,7 @@ LRESULT CALLBACK DMEditSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 		case WM_KILLFOCUS:
 		{
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			// This condition handles the case where the control is focused and we switch to a different tab.
 			// If we switch back, the previously focused control would have animated. We don't want that to happen.
@@ -4672,7 +4672,7 @@ LRESULT CALLBACK DMEditSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 				state |= 0x20;	// Was focused.
 			}
 
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x40 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x40 ) );
 		}
 		break;
 
@@ -4680,25 +4680,25 @@ LRESULT CALLBACK DMEditSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 		{
 			_BufferedPaintStopAllAnimations( hWnd );
 
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			state &= ~0x04;		// Unset the hovered state.
 
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x40 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x40 ) );
 		}
 		break;
 
 		//case WM_NCMOUSEMOVE:
 		case WM_MOUSEMOVE:
 		{
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			// Is it currently hovered?
 			if ( !( state & 0x04 ) )
 			{
 				state |= 0x04;	// Set the hovered state.
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )( state | 0x40 ) );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( state | 0x40 ) );
 			}
 		}
 		break;
@@ -4739,7 +4739,7 @@ LRESULT CALLBACK DMEditSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 		case WM_SETFOCUS:
 		case WM_WINDOWPOSCHANGING:
 		{
-			_SetPropW( hWnd, L"STATE", ( HANDLE )( ( DWORD )_GetPropW( hWnd, L"STATE" ) | 0x40 ) );
+			_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )( ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" ) | 0x40 ) );
 		}
 		break;
 
@@ -4759,7 +4759,7 @@ LRESULT CALLBACK DMEditSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 			HDC hDC = _GetWindowDC( hWnd );
 
-			DWORD state = ( DWORD )_GetPropW( hWnd, L"STATE" );
+			DWORD state = ( DWORD )( ULONG_PTR )_GetPropW( hWnd, L"STATE" );
 
 			if ( !_BufferedPaintRenderAnimation( hWnd, hDC ) && ( state & 0x40 ) )
 			{
@@ -4891,7 +4891,7 @@ LRESULT CALLBACK DMEditSubProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 					border_color1 = dm_color_edit_border_disabled;
 				}
 
-				_SetPropW( hWnd, L"STATE", ( HANDLE )state );
+				_SetPropW( hWnd, L"STATE", ( HANDLE )( ULONG_PTR )state );
 
 				//if ( was_enabled || was_disabled || border_color1 != border_color2 )
 				{
@@ -5022,7 +5022,7 @@ BOOL CALLBACK EnumChildProc( HWND hWnd, LPARAM /*lParam*/ )
 					hIL = UpdateButtonGlyphs( hWnd, &height_width );
 					if ( hIL != NULL )
 					{
-						_SetPropW( hWnd_parent, L"GLYPH_HW", ( HANDLE )height_width );
+						_SetPropW( hWnd_parent, L"GLYPH_HW", ( HANDLE )( ULONG_PTR )height_width );
 
 						_SetPropW( hWnd_parent, L"GLYPHS", ( HANDLE )hIL );
 
@@ -5039,7 +5039,7 @@ BOOL CALLBACK EnumChildProc( HWND hWnd, LPARAM /*lParam*/ )
 				}
 
 				UINT current_dpi_dark_mode = ( UINT )_SendMessageW( hWnd_parent, WM_GET_DPI, 0, 0 );
-				_SetPropW( hWnd, L"DPI", ( HANDLE )current_dpi_dark_mode );
+				_SetPropW( hWnd, L"DPI", ( HANDLE )( ULONG_PTR )current_dpi_dark_mode );
 
 				_SetWindowTheme( hWnd, L"", L"" );	// Don't want animation effects.
 
@@ -5126,7 +5126,7 @@ BOOL CALLBACK EnumChildProc( HWND hWnd, LPARAM /*lParam*/ )
 
 		HWND hWnd_parent = _GetParent( hWnd );
 		UINT current_dpi_dark_mode = ( UINT )_SendMessageW( hWnd_parent, WM_GET_DPI, 0, 0 );
-		_SetPropW( hWnd, L"DPI", ( HANDLE )current_dpi_dark_mode );
+		_SetPropW( hWnd, L"DPI", ( HANDLE )( ULONG_PTR )current_dpi_dark_mode );
 
 		SetSubclass( hWnd, &DMListBoxSubProc, &g_sci_list_box );
 	}
@@ -5199,14 +5199,14 @@ BOOL CALLBACK EnumChildProc( HWND hWnd, LPARAM /*lParam*/ )
 		_SendMessageW( hWnd, CB_GETCOMBOBOXINFO, 0, ( LPARAM )&cbi );
 		if ( cbi.hwndList != NULL )
 		{
-			_SetPropW( cbi.hwndList, L"DPI", ( HANDLE )current_dpi_dark_mode );
+			_SetPropW( cbi.hwndList, L"DPI", ( HANDLE )( ULONG_PTR )current_dpi_dark_mode );
 
 			SetSubclass( cbi.hwndList, &DMListBoxSubProc, &g_sci_list_box );
 
 			_SetWindowTheme( cbi.hwndList, L"", L"" );	// Don't want animation effects.
 		}
 
-		_SetPropW( hWnd, L"DPI", ( HANDLE )current_dpi_dark_mode );
+		_SetPropW( hWnd, L"DPI", ( HANDLE )( ULONG_PTR )current_dpi_dark_mode );
 
 		SetSubclass( hWnd, &DMComboBoxSubProc, &g_sci_combo_box );
 
@@ -5244,7 +5244,7 @@ BOOL CALLBACK EnumChildProc( HWND hWnd, LPARAM /*lParam*/ )
 
 			HWND hWnd_parent = _GetParent( hWnd );
 			UINT current_dpi_dark_mode = ( UINT )_SendMessageW( hWnd_parent, WM_GET_DPI, 0, 0 );
-			_SetPropW( hWnd, L"DPI", ( HANDLE )current_dpi_dark_mode );
+			_SetPropW( hWnd, L"DPI", ( HANDLE )( ULONG_PTR )current_dpi_dark_mode );
 
 			SetSubclass( hWnd, &DMTreeViewSubProc, &g_sci_tree_view );
 		}
@@ -5373,7 +5373,7 @@ BOOL CALLBACK EnumTLWProc( HWND hWnd, LPARAM /*lParam*/ )
 		/*WINDOWCOMPOSITIONATTRIBDATA data = { WCA_USEDARKMODECOLORS, &dark, sizeof( dark ) };
 		_SetWindowCompositionAttribute( hWnd, &data );*/
 
-		_DwmSetWindowAttribute( hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof( dark ) );
+		_DwmSetWindowAttribute( hWnd, DM_DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof( dark ) );
 
 		SetSubclass( hWnd, &DMControlColorSubProc, &g_sci_control_color );
 
@@ -5386,7 +5386,7 @@ BOOL CALLBACK EnumTLWProc( HWND hWnd, LPARAM /*lParam*/ )
 		/*WINDOWCOMPOSITIONATTRIBDATA data = { WCA_USEDARKMODECOLORS, &dark, sizeof( dark ) };
 		_SetWindowCompositionAttribute( hWnd, &data );*/
 
-		_DwmSetWindowAttribute( hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof( dark ) );
+		_DwmSetWindowAttribute( hWnd, DM_DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof( dark ) );
 
 		SetSubclass( hWnd, &DMMsgBoxColorSubProc, &g_sci_msg_box );
 
@@ -5426,7 +5426,7 @@ BOOL CALLBACK EnumMsgBoxChildProc( HWND hWnd, LPARAM /*lParam*/ )
 				hIL = UpdateButtonGlyphs( hWnd, &height_width );
 				if ( hIL != NULL )
 				{
-					_SetPropW( hWnd_parent, L"GLYPH_HW", ( HANDLE )height_width );
+					_SetPropW( hWnd_parent, L"GLYPH_HW", ( HANDLE )( ULONG_PTR )height_width );
 
 					_SetPropW( hWnd_parent, L"GLYPHS", ( HANDLE )hIL );
 
@@ -5443,7 +5443,7 @@ BOOL CALLBACK EnumMsgBoxChildProc( HWND hWnd, LPARAM /*lParam*/ )
 			}
 
 			UINT current_dpi_dark_mode = ( UINT )_SendMessageW( hWnd_parent, WM_GET_DPI, 0, 0 );
-			_SetPropW( hWnd, L"DPI", ( HANDLE )current_dpi_dark_mode );
+			_SetPropW( hWnd, L"DPI", ( HANDLE )( ULONG_PTR )current_dpi_dark_mode );
 
 			SetSubclass( hWnd, &DMCBRBSubProc, &g_sci_cbrb );
 		}
@@ -5580,11 +5580,11 @@ bool InitDarkMode()
 
 		if ( g_dm_buildNumber < WINDOWS_BUILD_20H1 )
 		{
-			DWMWA_USE_IMMERSIVE_DARK_MODE = 19;
+			DM_DWMWA_USE_IMMERSIVE_DARK_MODE = 19;
 		}
 		else
 		{
-			DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+			DM_DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
 		}
 
 		//

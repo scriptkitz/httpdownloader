@@ -63,8 +63,6 @@ void InitializeSystemTray( HWND hWnd )
 
 void InitializeIconValues( HWND hWnd )
 {
-	UINT current_dpi_main = ( UINT )_SendMessageW( hWnd, WM_GET_DPI, 0, 0 );
-
 	UninitializeIconValues();
 
 	HICON hIcon;
@@ -167,8 +165,6 @@ void UninitializeIconValues()
 
 HICON CreateSystemTrayIcon( unsigned long long start, unsigned long long end, COLORREF border_color, COLORREF progress_color )
 {
-	UINT current_dpi_main = ( UINT )_SendMessageW( g_hWnd_main, WM_GET_DPI, 0, 0 );
-
 	int i_percentage;
 
 	if ( end > 0 )

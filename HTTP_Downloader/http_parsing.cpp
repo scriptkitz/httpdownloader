@@ -5052,7 +5052,7 @@ char HandleRenamePrompt( SOCKET_CONTEXT *context )
 			{
 				rename_file_prompt_active = true;
 
-				HANDLE handle_prompt = ( HANDLE )_CreateThread( NULL, 0, PromptRenameFile, ( void * )( ( cfg_prompt_rename == 1 || ( cfg_prompt_rename == 0 && g_rename_file_cmb_ret == CMBIDRENAMEALL ) ) ? 1 : 0 ), 0, NULL );
+				HANDLE handle_prompt = ( HANDLE )_CreateThread( NULL, 0, PromptRenameFile, ( void * )( ULONG_PTR )( ( cfg_prompt_rename == 1 || ( cfg_prompt_rename == 0 && g_rename_file_cmb_ret == CMBIDRENAMEALL ) ) ? 1 : 0 ), 0, NULL );
 
 				// Make sure our thread spawned.
 				if ( handle_prompt == NULL )
@@ -5195,7 +5195,7 @@ char HandleLastModifiedPrompt( SOCKET_CONTEXT *context )
 			{
 				last_modified_prompt_active = true;
 
-				HANDLE handle_prompt = ( HANDLE )_CreateThread( NULL, 0, PromptLastModified, ( void * )( ( cfg_prompt_last_modified == 2 || ( cfg_prompt_last_modified == 0 && g_last_modified_cmb_ret == CMBIDRESTARTALL ) ) ? 1 : 0 ), 0, NULL );
+				HANDLE handle_prompt = ( HANDLE )_CreateThread( NULL, 0, PromptLastModified, ( void * )( ULONG_PTR )( ( cfg_prompt_last_modified == 2 || ( cfg_prompt_last_modified == 0 && g_last_modified_cmb_ret == CMBIDRESTARTALL ) ) ? 1 : 0 ), 0, NULL );
 
 				// Make sure our thread spawned.
 				if ( handle_prompt == NULL )

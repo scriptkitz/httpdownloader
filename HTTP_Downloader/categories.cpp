@@ -2473,8 +2473,8 @@ THREAD_RETURN handle_category_move( void *pArguments )
 
 					if ( di->tln != NULL )
 					{
-						TREELISTNODE *tln = ( TREELISTNODE * )di->tln;
-						int child_count = ( tln->is_expanded ? tln->child_count : 0 );
+						TREELISTNODE *tln2 = ( TREELISTNODE * )di->tln;
+						int child_count = ( tln2->is_expanded ? tln2->child_count : 0 );
 
 						if ( category_filter != NULL )
 						{

@@ -1601,7 +1601,7 @@ void HandleCommand( HWND hWnd, WORD command )
 
 		case MENU_START_INACTIVE:
 		{
-			HANDLE thread = ( HANDLE )_CreateThread( NULL, 0, handle_connection, ( void * )UINT_MAX, 0, NULL );
+			HANDLE thread = ( HANDLE )_CreateThread( NULL, 0, handle_connection, ( void * )( ULONG_PTR )UINT_MAX, 0, NULL );
 			if ( thread != NULL )
 			{
 				CloseHandle( thread );

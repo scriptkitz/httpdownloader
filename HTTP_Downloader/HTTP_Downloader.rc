@@ -7,7 +7,7 @@
 //
 // Generated from the TEXTINCLUDE 2 resource.
 //
-#include "afxres.h"
+#include "winres.h"
 
 /////////////////////////////////////////////////////////////////////////////
 #undef APSTUDIO_READONLY_SYMBOLS
@@ -83,7 +83,7 @@ BEGIN
             VALUE "FileDescription", "HTTP Downloader"
             VALUE "FileVersion", "1, 0, 6, 9"
             VALUE "InternalName", "HTTP Downloader"
-            VALUE "LegalCopyright", "Copyright © 2015-2025 Eric Kutcher"
+            VALUE "LegalCopyright", "Copyright ï¿½ 2015-2025 Eric Kutcher"
             VALUE "OriginalFilename", "HTTP_Downloader.exe"
             VALUE "ProductName", "HTTP Downloader"
             VALUE "ProductVersion", "1, 0, 6, 9"

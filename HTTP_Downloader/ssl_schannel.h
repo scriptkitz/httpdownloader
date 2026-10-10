@@ -37,7 +37,12 @@ typedef struct _UNICODE_STRING
 
 #include <schannel.h>
 
+#ifndef SCH_CREDENTIALS_VERSION
 #define SCH_CREDENTIALS_VERSION  0x00000005
+#endif
+
+// The Windows 10 SDK (10.0.15063+) already defines these TLS 1.3 types.
+#if !defined( NTDDI_WIN10_RS2 ) || ( NTDDI_VERSION < NTDDI_WIN10_RS2 )
 
 typedef enum _eTlsAlgorithmUsage
 {
@@ -85,6 +90,8 @@ typedef struct _SCH_CREDENTIALS
 	PTLS_PARAMETERS		pTlsParameters;
 } SCH_CREDENTIALS, *PSCH_CREDENTIALS;
 
+#endif // !defined( NTDDI_WIN10_RS2 ) || ( NTDDI_VERSION < NTDDI_WIN10_RS2 )
+
 #include "lite_ws2_32.h"
 
 #include "connection.h"
@@ -92,6 +99,8 @@ typedef struct _SCH_CREDENTIALS
 #define SSL_STATE_SHUTDOWN		0
 #define SSL_STATE_RUNNING		1
 
+// Newer SDKs define these protocol flags in schannel.h.
+#ifndef SP_PROT_TLS1_1_SERVER
 #define SP_PROT_TLS1_1_SERVER		0x00000100
 #define SP_PROT_TLS1_1_CLIENT		0x00000200
 #define SP_PROT_TLS1_1				( SP_PROT_TLS1_1_SERVER | SP_PROT_TLS1_1_CLIENT )
@@ -101,6 +110,7 @@ typedef struct _SCH_CREDENTIALS
 #define SP_PROT_TLS1_3_SERVER		0x00001000
 #define SP_PROT_TLS1_3_CLIENT		0x00002000
 #define SP_PROT_TLS1_3				( SP_PROT_TLS1_3_SERVER | SP_PROT_TLS1_3_CLIENT )
+#endif
 
 /*struct ACCEPT_DATA
 {

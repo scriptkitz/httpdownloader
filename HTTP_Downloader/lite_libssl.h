@@ -23,12 +23,62 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+// The program loads libssl/libcrypto at runtime, so the OpenSSL headers are only
+// needed for type checking. Include the full headers only when they're available
+// (define USE_OPENSSL_HEADERS to opt in); otherwise use self-contained
+// forward declarations and constants.
+#ifdef USE_OPENSSL_HEADERS
+
 #pragma push_macro( "_MSC_VER" )
 #undef _MSC_VER
 #define _MSC_VER 1600	// We have stdint.h, so make e_os2.h think we're an older version (VS 2010+).
 #include <openssl/ssl.h>
 #include <openssl/ssl2.h>
 #pragma pop_macro( "_MSC_VER" )
+
+#else
+
+#include <stdint.h>
+typedef struct ssl_st SSL;
+typedef struct ssl_ctx_st SSL_CTX;
+typedef struct ssl_session_st SSL_SESSION;
+typedef struct ssl_method_st SSL_METHOD;
+typedef struct bio_st BIO;
+typedef struct bio_method_st BIO_METHOD;
+typedef struct x509_st X509;
+typedef struct evp_pkey_st EVP_PKEY;
+#define STACK_OF( type ) struct stack_st_##type
+
+#define BIO_CTRL_PENDING				10
+#define SSL_ERROR_NONE					0
+#define SSL_ERROR_SSL					1
+#define SSL_ERROR_WANT_READ				2
+#define SSL_ERROR_WANT_WRITE			3
+#define SSL_ERROR_WANT_X509_LOOKUP		4
+#define SSL_ERROR_SYSCALL				5
+#define SSL_ERROR_ZERO_RETURN			6
+#define SSL_CTRL_OPTIONS				32
+#define SSL_CTRL_MODE					33
+#define SSL_CTRL_SET_TLSEXT_HOSTNAME	55
+#define TLSEXT_NAMETYPE_host_name		0
+#define SSL_VERIFY_NONE					0
+#define SSL_VERIFY_PEER					1
+#define SSL_FILETYPE_PEM				1
+#define SSL_FILETYPE_ASN1				2
+#define SSL2_VERSION					0x0002
+#define SSL3_VERSION					0x0300
+#define TLS1_VERSION					0x0301
+#define TLS1_1_VERSION					0x0302
+#define TLS1_2_VERSION					0x0303
+#define TLS1_3_VERSION					0x0304
+#define SSL_CTRL_SET_MIN_PROTO_VERSION	123
+#define SSL_CTRL_SET_MAX_PROTO_VERSION	124
+#define SSL_CTRL_SET_SESS_CACHE_MODE	44
+#define SSL_SESS_CACHE_CLIENT			0x0001
+#define SSL_SESS_CACHE_SERVER			0x0002
+#define SSL_SESS_CACHE_BOTH				0x0003
+
+#endif // USE_OPENSSL_HEADERS
 
 //#define LIBSSL_USE_STATIC_LIB
 

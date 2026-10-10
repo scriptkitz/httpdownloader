@@ -165,6 +165,10 @@ unsigned int g_session_status_count[ NUM_SESSION_STATUS ] = { 0 };	// 9 states t
 
 volatile LONG g_status_count[ 17 ] = { 0 };	// 17 states (indices 0 - 16). STATUS_INSUFFICIENT_DISK_SPACE maps to index 16.
 
+// The maximum number of parts we're allowed to have active while dynamically reallocating parts.
+// parts_limit is set when the user adjusts an active download's parts number. 0 means it's not set.
+static unsigned short GetDynamicPartsTarget( DOWNLOAD_INFO *di );
+
 bool g_timers_running = false;
 
 bool g_waiting_for_update = false;
@@ -599,6 +603,22 @@ DWORD WINAPI Timeout( LPVOID /*WorkThreadContext*/ )
 								}
 							}
 						}
+					}
+
+					// See if we should post a dynamic part-split request for this download.
+					// We'll post an IOCP completion so that the split happens on a worker thread.
+					if ( cfg_reallocate_parts &&
+						 context->download_info != NULL &&
+						 context->download_info->parts > 1 &&
+						 context->status == STATUS_DOWNLOADING &&
+						 context->download_info->active_parts < GetDynamicPartsTarget( context->download_info ) &&
+						 InterlockedCompareExchange( &context->split_requested, 1, 0 ) == 0 )
+					{
+						InterlockedIncrement( &context->pending_operations );
+
+						context->overlapped_reallocate.current_operation = IO_Reallocate;
+
+						PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped_reallocate );
 					}
 
 					LeaveCriticalSection( &context->context_cs );
@@ -1358,7 +1378,7 @@ SOCKET CreateSocket( bool IPv6 )
 
 THREAD_RETURN PromptRenameFile( void *pArguments )
 {
-	unsigned char rename_only = ( unsigned char )pArguments;
+	unsigned char rename_only = ( unsigned char )( ULONG_PTR )pArguments;
 
 	bool skip_processing = false;
 
@@ -1691,7 +1711,7 @@ THREAD_RETURN PromptFileSize( void * /*pArguments*/ )
 
 THREAD_RETURN PromptLastModified( void *pArguments )
 {
-	unsigned char restart_only = ( unsigned char )pArguments;
+	unsigned char restart_only = ( unsigned char )( ULONG_PTR )pArguments;
 
 	bool skip_processing = false;
 
@@ -4407,6 +4427,37 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				}
 
 				LeaveCriticalSection( &context->context_cs );
+			}
+			break;
+
+			case IO_Reallocate:	// Posted by the timeout thread when a download can split another part.
+			{
+				bool do_split = false;
+				DOWNLOAD_INFO *di = NULL;
+
+				EnterCriticalSection( &context->context_cs );
+
+				InterlockedExchange( &context->split_requested, 0 );
+
+				if ( context->cleanup == 0 &&
+					 cfg_reallocate_parts &&
+					 context->download_info != NULL &&
+					 context->download_info->parts > 1 &&
+					 context->status == STATUS_DOWNLOADING &&
+					 context->download_info->active_parts < GetDynamicPartsTarget( context->download_info ) )
+				{
+					do_split = true;
+					di = context->download_info;
+				}
+
+				LeaveCriticalSection( &context->context_cs );
+
+				InterlockedDecrement( &context->pending_operations );
+
+				if ( do_split && di != NULL )
+				{
+					SplitLargestPart( di );
+				}
 			}
 			break;
 
@@ -8783,269 +8834,286 @@ void AddToMoveFileQueue( DOWNLOAD_INFO *di )
 	}
 }
 
-void ReallocateParts( SOCKET_CONTEXT *context )
+// The maximum number of parts we're allowed to have active while dynamically reallocating parts.
+// parts_limit is set when the user adjusts an active download's parts number. 0 means it's not set.
+static unsigned short GetDynamicPartsTarget( DOWNLOAD_INFO *di )
 {
-	if ( context != NULL && context->download_info != NULL )
+	if ( di == NULL )
 	{
-		DOWNLOAD_INFO *di = context->download_info;
+		return 0;
+	}
 
-		// Find the context with the largest remaining part.
-		DoublyLinkedList *parts_list = di->parts_list;
-		SOCKET_CONTEXT *reallocated_context = NULL;
-		unsigned long long remaining_size = 0;
-		while ( parts_list != NULL )
+	return ( di->parts_limit > 0 ? di->parts_limit : di->parts );
+}
+
+void SplitLargestPart( DOWNLOAD_INFO *di )
+{
+	if ( di == NULL )
+	{
+		return;
+	}
+
+	EnterCriticalSection( &di->di_cs );
+
+	// Find the context with the largest remaining part.
+	DoublyLinkedList *parts_list = di->parts_list;
+	SOCKET_CONTEXT *reallocated_context = NULL;
+	unsigned long long remaining_size = 0;
+	while ( parts_list != NULL )
+	{
+		SOCKET_CONTEXT *active_context = ( SOCKET_CONTEXT * )parts_list->data;
+		if ( active_context != NULL &&
+			 active_context->status == STATUS_DOWNLOADING &&
+			 active_context->header_info.range_info != NULL &&
+		   ( active_context->header_info.range_info->content_offset < ( ( active_context->header_info.range_info->range_end - active_context->header_info.range_info->range_start ) + 1 ) ) )
 		{
-			SOCKET_CONTEXT *active_context = ( SOCKET_CONTEXT * )parts_list->data;
-			if ( active_context->header_info.range_info != NULL &&
-			   ( active_context->header_info.range_info->content_offset < ( ( active_context->header_info.range_info->range_end - active_context->header_info.range_info->range_start ) + 1 ) ) )
+			unsigned long long tmp_remaining_size = ( ( active_context->header_info.range_info->range_end - active_context->header_info.range_info->range_start ) + 1 ) - active_context->header_info.range_info->content_offset;
+			if ( tmp_remaining_size > remaining_size )
 			{
-				unsigned long long tmp_remaining_size = ( ( active_context->header_info.range_info->range_end - active_context->header_info.range_info->range_start ) + 1 ) - active_context->header_info.range_info->content_offset;
-				if ( tmp_remaining_size > remaining_size )
-				{
-					remaining_size = tmp_remaining_size;
-					reallocated_context = active_context;
-				}
+				remaining_size = tmp_remaining_size;
+				reallocated_context = active_context;
 			}
-
-			parts_list = parts_list->next;
 		}
 
-		// If the remaining size is greater than the threshold size, then we'll split it.
-		if ( reallocated_context != NULL &&
-			 reallocated_context->header_info.range_info != NULL &&
-			 remaining_size > cfg_reallocate_threshold_size )
+		parts_list = parts_list->next;
+	}
+
+	// Only split if both halves will meet the minimum part size.
+	if ( reallocated_context != NULL &&
+		 reallocated_context->header_info.range_info != NULL &&
+		 ( remaining_size / 2 ) >= cfg_reallocate_threshold_size )
+	{
+		// Allocate a new range node for the new part.
+		RANGE_INFO *ri = ( RANGE_INFO * )GlobalAlloc( GMEM_FIXED, sizeof( RANGE_INFO ) );
+		if ( ri != NULL )
 		{
-			// Adjust each context's part number depending on which context we're splitting.
-			parts_list = di->parts_list;
-			while ( parts_list != NULL )
+			DoublyLinkedList *range_node = DLL_CreateNode( ( void * )ri );
+			if ( range_node != NULL )
 			{
-				SOCKET_CONTEXT *active_context = ( SOCKET_CONTEXT * )parts_list->data;
-				if ( context->part <= reallocated_context->part && active_context->part > context->part && active_context->part <= reallocated_context->part )
+				// Try to lock the target context so that we don't race against its write progress checks.
+				// If it's busy completing an IO operation, then skip this round to avoid a lock inversion.
+				if ( TryEnterCriticalSection( &reallocated_context->context_cs ) == TRUE )
 				{
-					--active_context->part;
-				}
-				else if ( context->part > reallocated_context->part && active_context->part < context->part && active_context->part > reallocated_context->part )
-				{
-					++active_context->part;
-				}
+					unsigned long long new_range_end = reallocated_context->header_info.range_info->range_end - ( remaining_size / 2 );
 
-				parts_list = parts_list->next;
-			}
-
-			// Save the request information, the header information (if we got any), and create a new connection.
-			SOCKET_CONTEXT *new_context = CreateSocketContext();
-			if ( new_context != NULL )
-			{
-				new_context->processed_header = true;
-
-				new_context->part = reallocated_context->part + 1;
-				new_context->parts = reallocated_context->parts;
-
-				new_context->got_filename = reallocated_context->got_filename;	// No need to rename it again.
-				new_context->got_last_modified = reallocated_context->got_last_modified;	// No need to get the date/time again.
-				new_context->show_file_size_prompt = reallocated_context->show_file_size_prompt;	// No need to prompt again.
-
-				new_context->request_info.host = GlobalStrDupA( reallocated_context->request_info.host );
-				new_context->request_info.port = reallocated_context->request_info.port;
-				new_context->request_info.resource = GlobalStrDupA( reallocated_context->request_info.resource );
-				new_context->request_info.protocol = reallocated_context->request_info.protocol;
-
-				if ( reallocated_context->request_info.protocol == PROTOCOL_FTP ||
-					 reallocated_context->request_info.protocol == PROTOCOL_FTPS ||
-					 reallocated_context->request_info.protocol == PROTOCOL_FTPES )
-				{
-					new_context->ftp_connection_type = FTP_CONNECTION_TYPE_CONTROL;
-
-					new_context->request_info.redirect_count = reallocated_context->request_info.redirect_count;	// This is being used to determine whether we've switched modes (fallback mode).
-					new_context->header_info.connection = reallocated_context->header_info.connection;				// This is being used as our mode value. (cfg_ftp_mode_type)
-				}
-				else if ( reallocated_context->request_info.protocol == PROTOCOL_HTTP ||
-						  reallocated_context->request_info.protocol == PROTOCOL_HTTPS )
-				{
-					new_context->request_info.auth_info.username = GlobalStrDupA( reallocated_context->request_info.auth_info.username );
-					new_context->request_info.auth_info.password = GlobalStrDupA( reallocated_context->request_info.auth_info.password );
-
-					new_context->header_info.cookie_tree = CopyCookieTree( reallocated_context->header_info.cookie_tree );
-					new_context->header_info.cookies = GlobalStrDupA( reallocated_context->header_info.cookies );
-
-					// We can copy the digest info so that we don't have to make any extra requests to 401 and 407 responses.
-					if ( reallocated_context->header_info.digest_info != NULL )
+					// If the context has already downloaded past the split point, then there's nothing worth splitting.
+					if ( reallocated_context->header_info.range_info->content_offset <= ( new_range_end - reallocated_context->header_info.range_info->range_start ) )
 					{
-						new_context->header_info.digest_info = ( AUTH_INFO * )GlobalAlloc( GPTR, sizeof( AUTH_INFO ) );
+						ri->content_length = 0;
+						ri->content_offset = 0;
 
-						new_context->header_info.digest_info->algorithm = reallocated_context->header_info.digest_info->algorithm;
-						new_context->header_info.digest_info->auth_type = reallocated_context->header_info.digest_info->auth_type;
-						new_context->header_info.digest_info->qop_type = reallocated_context->header_info.digest_info->qop_type;
+						// Split the reallocated context's range_info.
+						ri->range_end = reallocated_context->header_info.range_info->range_end;
+						reallocated_context->header_info.range_info->range_end = new_range_end;
+						ri->range_start = new_range_end + 1;
+						ri->file_write_offset = ri->range_start;
 
-						new_context->header_info.digest_info->domain = GlobalStrDupA( reallocated_context->header_info.digest_info->domain );
-						new_context->header_info.digest_info->nonce = GlobalStrDupA( reallocated_context->header_info.digest_info->nonce );
-						new_context->header_info.digest_info->opaque = GlobalStrDupA( reallocated_context->header_info.digest_info->opaque );
-						new_context->header_info.digest_info->qop = GlobalStrDupA( reallocated_context->header_info.digest_info->qop );
-						new_context->header_info.digest_info->realm = GlobalStrDupA( reallocated_context->header_info.digest_info->realm );
-					}
-
-					if ( reallocated_context->header_info.proxy_digest_info != NULL )
-					{
-						new_context->header_info.proxy_digest_info = ( AUTH_INFO * )GlobalAlloc( GPTR, sizeof( AUTH_INFO ) );
-
-						new_context->header_info.proxy_digest_info->algorithm = reallocated_context->header_info.proxy_digest_info->algorithm;
-						new_context->header_info.proxy_digest_info->auth_type = reallocated_context->header_info.proxy_digest_info->auth_type;
-						new_context->header_info.proxy_digest_info->qop_type = reallocated_context->header_info.proxy_digest_info->qop_type;
-
-						new_context->header_info.proxy_digest_info->domain = GlobalStrDupA( reallocated_context->header_info.proxy_digest_info->domain );
-						new_context->header_info.proxy_digest_info->nonce = GlobalStrDupA( reallocated_context->header_info.proxy_digest_info->nonce );
-						new_context->header_info.proxy_digest_info->opaque = GlobalStrDupA( reallocated_context->header_info.proxy_digest_info->opaque );
-						new_context->header_info.proxy_digest_info->qop = GlobalStrDupA( reallocated_context->header_info.proxy_digest_info->qop );
-						new_context->header_info.proxy_digest_info->realm = GlobalStrDupA( reallocated_context->header_info.proxy_digest_info->realm );
-					}
-				}
-
-				// Reuse the completed range_node from the current context.
-				DoublyLinkedList *range_node = di->range_list;
-				while ( range_node != NULL && range_node->data != context->header_info.range_info )
-				{
-					range_node = range_node->next;
-				}
-
-				RANGE_INFO *ri;
-
-				// The completed range_node's next sibling needs to have its values adjusted.
-				// Its start value will become the completed range_node's start value.
-				// Its content offset will include everything between it and the completed range_node's start value.
-				if ( range_node != NULL && range_node->next != NULL )
-				{
-					RANGE_INFO *completed_range_info = ( RANGE_INFO * )range_node->data;
-					RANGE_INFO *next_range_info = ( RANGE_INFO * )range_node->next->data;
-
-					next_range_info->content_offset += ( next_range_info->range_start - completed_range_info->range_start );
-					next_range_info->range_start = completed_range_info->range_start;
-
-					DLL_RemoveNode( &di->range_list, range_node );
-
-					di->print_range_list = di->range_list;
-
-					// We'll reuse the existing range node.
-					ri = ( RANGE_INFO * )range_node->data;
-				}
-				else	// We can't apply the adjustments above to the last node since it has no next sibling, so we'll just create one.
-				{
-					ri = ( RANGE_INFO * )GlobalAlloc( GMEM_FIXED/*GPTR*/, sizeof( RANGE_INFO ) );
-					if ( ri != NULL )
-					{
-						range_node = DLL_CreateNode( ( void * )ri );
-					}
-				}
-
-				if ( ri != NULL )
-				{
-					ri->content_length = 0;
-					ri->content_offset = 0;
-
-					// Split the reallocated context's range_info.
-					ri->range_end = reallocated_context->header_info.range_info->range_end;
-					reallocated_context->header_info.range_info->range_end -= ( remaining_size / 2 );
-					ri->range_start = reallocated_context->header_info.range_info->range_end + 1;
-					ri->file_write_offset = ri->range_start;
-
-					if ( reallocated_context->request_info.protocol != PROTOCOL_HTTP &&
-						 reallocated_context->request_info.protocol != PROTOCOL_HTTPS )
-					{
-						ri->content_length = reallocated_context->header_info.range_info->content_length;
-					}
-
-					new_context->header_info.range_info = ri;
-
-					//
-
-					new_context->context_node.data = new_context;
-
-					EnterCriticalSection( &context_list_cs );
-
-					DLL_AddNode( &g_context_list, &new_context->context_node, 0 );
-
-					LeaveCriticalSection( &context_list_cs );
-
-					// Add to the parts list.
-					if ( reallocated_context->download_info != NULL )
-					{
-						EnterCriticalSection( &reallocated_context->download_info->di_cs );
-
-						new_context->download_info = reallocated_context->download_info;
-
-						++( new_context->download_info->active_parts );
-
-						// Find the reallocated context's range_info node.
-						DoublyLinkedList *reallocated_range_node = reallocated_context->download_info->range_list;
-						while ( reallocated_range_node != NULL && reallocated_range_node->data != reallocated_context->header_info.range_info )
+						if ( reallocated_context->request_info.protocol != PROTOCOL_HTTP &&
+							 reallocated_context->request_info.protocol != PROTOCOL_HTTPS )
 						{
-							reallocated_range_node = reallocated_range_node->next;
+							ri->content_length = reallocated_context->header_info.range_info->content_length;
 						}
 
-						// Insert the new range_node into the range_list.
-						if ( reallocated_range_node != NULL )
+						LeaveCriticalSection( &reallocated_context->context_cs );
+
+						// Save the request information, the header information (if we got any), and create a new connection.
+						SOCKET_CONTEXT *new_context = CreateSocketContext();
+						if ( new_context != NULL )
 						{
-							range_node->next = reallocated_range_node->next;
-							if ( reallocated_range_node->next != NULL )
+							new_context->processed_header = true;
+
+							new_context->part = reallocated_context->part + 1;
+							new_context->parts = reallocated_context->parts;
+
+							new_context->got_filename = reallocated_context->got_filename;	// No need to rename it again.
+							new_context->got_last_modified = reallocated_context->got_last_modified;	// No need to get the date/time again.
+							new_context->show_file_size_prompt = reallocated_context->show_file_size_prompt;	// No need to prompt again.
+
+							new_context->request_info.host = GlobalStrDupA( reallocated_context->request_info.host );
+							new_context->request_info.port = reallocated_context->request_info.port;
+							new_context->request_info.resource = GlobalStrDupA( reallocated_context->request_info.resource );
+							new_context->request_info.protocol = reallocated_context->request_info.protocol;
+
+							if ( reallocated_context->request_info.protocol == PROTOCOL_FTP ||
+								 reallocated_context->request_info.protocol == PROTOCOL_FTPS ||
+								 reallocated_context->request_info.protocol == PROTOCOL_FTPES )
 							{
-								reallocated_range_node->next->prev = range_node;
+								new_context->ftp_connection_type = FTP_CONNECTION_TYPE_CONTROL;
+
+								new_context->request_info.redirect_count = reallocated_context->request_info.redirect_count;	// This is being used to determine whether we've switched modes (fallback mode).
+								new_context->header_info.connection = reallocated_context->header_info.connection;				// This is being used as our mode value. (cfg_ftp_mode_type)
 							}
-							else
+							else if ( reallocated_context->request_info.protocol == PROTOCOL_HTTP ||
+									  reallocated_context->request_info.protocol == PROTOCOL_HTTPS )
 							{
-								new_context->download_info->range_list->prev = range_node;
+								new_context->request_info.auth_info.username = GlobalStrDupA( reallocated_context->request_info.auth_info.username );
+								new_context->request_info.auth_info.password = GlobalStrDupA( reallocated_context->request_info.auth_info.password );
+
+								new_context->header_info.cookie_tree = CopyCookieTree( reallocated_context->header_info.cookie_tree );
+								new_context->header_info.cookies = GlobalStrDupA( reallocated_context->header_info.cookies );
+
+								// We can copy the digest info so that we don't have to make any extra requests to 401 and 407 responses.
+								if ( reallocated_context->header_info.digest_info != NULL )
+								{
+									new_context->header_info.digest_info = ( AUTH_INFO * )GlobalAlloc( GPTR, sizeof( AUTH_INFO ) );
+
+									new_context->header_info.digest_info->algorithm = reallocated_context->header_info.digest_info->algorithm;
+									new_context->header_info.digest_info->auth_type = reallocated_context->header_info.digest_info->auth_type;
+									new_context->header_info.digest_info->qop_type = reallocated_context->header_info.digest_info->qop_type;
+
+									new_context->header_info.digest_info->domain = GlobalStrDupA( reallocated_context->header_info.digest_info->domain );
+									new_context->header_info.digest_info->nonce = GlobalStrDupA( reallocated_context->header_info.digest_info->nonce );
+									new_context->header_info.digest_info->opaque = GlobalStrDupA( reallocated_context->header_info.digest_info->opaque );
+									new_context->header_info.digest_info->qop = GlobalStrDupA( reallocated_context->header_info.digest_info->qop );
+									new_context->header_info.digest_info->realm = GlobalStrDupA( reallocated_context->header_info.digest_info->realm );
+								}
+
+								if ( reallocated_context->header_info.proxy_digest_info != NULL )
+								{
+									new_context->header_info.proxy_digest_info = ( AUTH_INFO * )GlobalAlloc( GPTR, sizeof( AUTH_INFO ) );
+
+									new_context->header_info.proxy_digest_info->algorithm = reallocated_context->header_info.proxy_digest_info->algorithm;
+									new_context->header_info.proxy_digest_info->auth_type = reallocated_context->header_info.proxy_digest_info->auth_type;
+									new_context->header_info.proxy_digest_info->qop_type = reallocated_context->header_info.proxy_digest_info->qop_type;
+
+									new_context->header_info.proxy_digest_info->domain = GlobalStrDupA( reallocated_context->header_info.proxy_digest_info->domain );
+									new_context->header_info.proxy_digest_info->nonce = GlobalStrDupA( reallocated_context->header_info.proxy_digest_info->nonce );
+									new_context->header_info.proxy_digest_info->opaque = GlobalStrDupA( reallocated_context->header_info.proxy_digest_info->opaque );
+									new_context->header_info.proxy_digest_info->qop = GlobalStrDupA( reallocated_context->header_info.proxy_digest_info->qop );
+									new_context->header_info.proxy_digest_info->realm = GlobalStrDupA( reallocated_context->header_info.proxy_digest_info->realm );
+								}
 							}
-							range_node->prev = reallocated_range_node;
-							reallocated_range_node->next = range_node;
-						}
-						else	// Shouldn't happen.
-						{
-							GlobalFree( range_node->data );
-							GlobalFree( range_node );
-						}
 
-						new_context->parts_node.data = new_context;
+							// Shift the part numbers of the contexts that come after the split context.
+							parts_list = di->parts_list;
+							while ( parts_list != NULL )
+							{
+								SOCKET_CONTEXT *active_context = ( SOCKET_CONTEXT * )parts_list->data;
+								if ( active_context != NULL && active_context->part > reallocated_context->part )
+								{
+									++( active_context->part );
+								}
 
-						// Insert the new context into the parts_list.
-						new_context->parts_node.next = reallocated_context->parts_node.next;
-						if ( reallocated_context->parts_node.next != NULL )
-						{
-							reallocated_context->parts_node.next->prev = &new_context->parts_node;
+								parts_list = parts_list->next;
+							}
+
+							new_context->header_info.range_info = ri;
+
+							new_context->context_node.data = new_context;
+
+							EnterCriticalSection( &context_list_cs );
+
+							DLL_AddNode( &g_context_list, &new_context->context_node, 0 );
+
+							LeaveCriticalSection( &context_list_cs );
+
+							new_context->download_info = di;
+
+							++( di->active_parts );
+
+							// Find the reallocated context's range_info node.
+							DoublyLinkedList *reallocated_range_node = di->range_list;
+							while ( reallocated_range_node != NULL && reallocated_range_node->data != reallocated_context->header_info.range_info )
+							{
+								reallocated_range_node = reallocated_range_node->next;
+							}
+
+							// Insert the new range_node into the range_list right after the split range.
+							if ( reallocated_range_node != NULL )
+							{
+								range_node->next = reallocated_range_node->next;
+								if ( reallocated_range_node->next != NULL )
+								{
+									reallocated_range_node->next->prev = range_node;
+								}
+								else
+								{
+									di->range_list->prev = range_node;
+								}
+								range_node->prev = reallocated_range_node;
+								reallocated_range_node->next = range_node;
+							}
+							else	// Shouldn't happen.
+							{
+								GlobalFree( range_node->data );
+								GlobalFree( range_node );
+								range_node = NULL;
+							}
+
+							if ( range_node != NULL )
+							{
+								new_context->parts_node.data = new_context;
+
+								// Insert the new context into the parts_list.
+								new_context->parts_node.next = reallocated_context->parts_node.next;
+								if ( reallocated_context->parts_node.next != NULL )
+								{
+									reallocated_context->parts_node.next->prev = &new_context->parts_node;
+								}
+								else
+								{
+									di->parts_list->prev = &new_context->parts_node;
+								}
+								new_context->parts_node.prev = &reallocated_context->parts_node;
+								reallocated_context->parts_node.next = &new_context->parts_node;
+
+								// For groups.
+								if ( IS_GROUP( di ) )
+								{
+									EnterCriticalSection( &di->shared_info->di_cs );
+
+									++( di->shared_info->active_parts );
+
+									LeaveCriticalSection( &di->shared_info->di_cs );
+								}
+
+								new_context->status = STATUS_CONNECTING;
+
+								LeaveCriticalSection( &di->di_cs );
+
+								if ( !CreateConnection( new_context, new_context->request_info.host, new_context->request_info.port ) )
+								{
+									new_context->status = STATUS_FAILED;
+
+									InterlockedIncrement( &new_context->pending_operations );
+
+									new_context->overlapped.current_operation = IO_Close;
+
+									PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )new_context, ( OVERLAPPED * )&new_context->overlapped );
+								}
+
+								return;
+							}
 						}
 						else
 						{
-							new_context->download_info->parts_list->prev = &new_context->parts_node;
+							// We couldn't create a new context, so free the range node.
+							GlobalFree( range_node->data );
+							GlobalFree( range_node );
+							range_node = NULL;
 						}
-						new_context->parts_node.prev = &reallocated_context->parts_node;
-						reallocated_context->parts_node.next = &new_context->parts_node;
-
-						LeaveCriticalSection( &reallocated_context->download_info->di_cs );
-
-						EnterCriticalSection( &reallocated_context->download_info->shared_info->di_cs );
-
-						// For groups.
-						if ( IS_GROUP( reallocated_context->download_info ) )
-						{
-							++( reallocated_context->download_info->shared_info->active_parts );
-						}
-
-						LeaveCriticalSection( &reallocated_context->download_info->shared_info->di_cs );
 					}
-
-					new_context->status = STATUS_CONNECTING;
-
-					if ( !CreateConnection( new_context, new_context->request_info.host, new_context->request_info.port ) )
+					else
 					{
-						new_context->status = STATUS_FAILED;
-
-						InterlockedIncrement( &new_context->pending_operations );
-
-						new_context->overlapped.current_operation = IO_Close;
-
-						PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )new_context, ( OVERLAPPED * )&new_context->overlapped );
+						LeaveCriticalSection( &reallocated_context->context_cs );
 					}
 				}
+
+				// We either couldn't lock the context, or the split was aborted, so free the range node.
+				if ( range_node != NULL )
+				{
+					GlobalFree( range_node->data );
+					GlobalFree( range_node );
+				}
+			}
+			else
+			{
+				GlobalFree( ri );
 			}
 		}
 	}
+
+	LeaveCriticalSection( &di->di_cs );
 }
 
 bool CleanupFTPContexts( SOCKET_CONTEXT *context )
@@ -9415,11 +9483,16 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 							++shared_active_parts;
 
 							if ( cfg_reallocate_parts &&
-								 di->parts > 1 && di->parts_limit != 1 &&
+								 // Dynamically reallocate parts. If the number of active parts is below the
+								 // limit, then split the largest remaining part to keep the parts busy.
+								 // Reducing the limit will stop new parts from being created, and the
+								 // active parts will wind down on their own as they finish.
+								 di->parts > 1 &&
+								 di->active_parts < GetDynamicPartsTarget( di ) &&
 								 !incomplete_part &&
 								 context->status == STATUS_DOWNLOADING )
 							{
-								ReallocateParts( context );
+								SplitLargestPart( di );
 							}
 						}
 

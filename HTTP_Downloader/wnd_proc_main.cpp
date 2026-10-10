@@ -1468,7 +1468,7 @@ LRESULT CALLBACK MainWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam 
 
 			//
 
-			g_splitter_cursor = _LoadCursorW( NULL, MAKEINTRESOURCE( IDC_SIZEWE ) );
+			g_splitter_cursor = _LoadCursorW( NULL, IDC_SIZEWE );
 
 			g_hWnd_categories = _CreateWindowExW( TVS_EX_DOUBLEBUFFER, WC_TREEVIEW, NULL, TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT | TVS_EDITLABELS | TVS_SHOWSELALWAYS | TVS_NOTOOLTIPS/*TVS_INFOTIP*/ | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
 
@@ -1925,7 +1925,7 @@ LRESULT CALLBACK MainWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam 
 						{
 							if ( cti->type == CATEGORY_TREE_INFO_TYPE_STATUS )
 							{
-								status = ( unsigned int )cti->data;
+								status = ( unsigned int )( ULONG_PTR )cti->data;
 							}
 							else if ( cti->type == CATEGORY_TREE_INFO_TYPE_CATEGORY_INFO && cti->data != NULL )
 							{
@@ -2716,20 +2716,20 @@ LRESULT CALLBACK MainWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam 
 
 				// Our pointers were used to store each string's offset past the CL_ARGS struct.
 				// We're reverting them back to point to their respective string.
-				cla->category = ( cla->category_length > 0 ? cl_val + ( unsigned int )cla->category : NULL );
-				cla->download_directory = ( cla->download_directory_length > 0 ? cl_val + ( unsigned int )cla->download_directory : NULL );
-				cla->download_history_file = ( cla->download_history_file_length > 0 ? cl_val + ( unsigned int )cla->download_history_file : NULL );
-				cla->url_list_file = ( cla->url_list_file_length > 0 ? cl_val + ( unsigned int )cla->url_list_file : NULL );
-				cla->urls = ( cla->urls_length > 0 ? cl_val + ( unsigned int )cla->urls : NULL );
-				cla->comments = ( cla->comments_length > 0 ? cl_val + ( unsigned int )cla->comments : NULL );
-				cla->cookies = ( cla->cookies_length > 0 ? cl_val + ( unsigned int )cla->cookies : NULL );
-				cla->data = ( cla->data_length > 0 ? cl_val + ( unsigned int )cla->data : NULL );
-				cla->headers = ( cla->headers_length > 0 ? cl_val + ( unsigned int )cla->headers : NULL );
-				cla->username = ( cla->username_length > 0 ? cl_val + ( unsigned int )cla->username : NULL );
-				cla->password = ( cla->password_length > 0 ? cl_val + ( unsigned int )cla->password : NULL );
-				cla->proxy_hostname = ( cla->proxy_hostname_length > 0 ? cl_val + ( unsigned int )cla->proxy_hostname : NULL );
-				cla->proxy_username = ( cla->proxy_username_length > 0 ? cl_val + ( unsigned int )cla->proxy_username : NULL );
-				cla->proxy_password = ( cla->proxy_password_length > 0 ? cl_val + ( unsigned int )cla->proxy_password : NULL );
+				cla->category = ( cla->category_length > 0 ? cl_val + ( unsigned int )( ULONG_PTR )cla->category : NULL );
+				cla->download_directory = ( cla->download_directory_length > 0 ? cl_val + ( unsigned int )( ULONG_PTR )cla->download_directory : NULL );
+				cla->download_history_file = ( cla->download_history_file_length > 0 ? cl_val + ( unsigned int )( ULONG_PTR )cla->download_history_file : NULL );
+				cla->url_list_file = ( cla->url_list_file_length > 0 ? cl_val + ( unsigned int )( ULONG_PTR )cla->url_list_file : NULL );
+				cla->urls = ( cla->urls_length > 0 ? cl_val + ( unsigned int )( ULONG_PTR )cla->urls : NULL );
+				cla->comments = ( cla->comments_length > 0 ? cl_val + ( unsigned int )( ULONG_PTR )cla->comments : NULL );
+				cla->cookies = ( cla->cookies_length > 0 ? cl_val + ( unsigned int )( ULONG_PTR )cla->cookies : NULL );
+				cla->data = ( cla->data_length > 0 ? cl_val + ( unsigned int )( ULONG_PTR )cla->data : NULL );
+				cla->headers = ( cla->headers_length > 0 ? cl_val + ( unsigned int )( ULONG_PTR )cla->headers : NULL );
+				cla->username = ( cla->username_length > 0 ? cl_val + ( unsigned int )( ULONG_PTR )cla->username : NULL );
+				cla->password = ( cla->password_length > 0 ? cl_val + ( unsigned int )( ULONG_PTR )cla->password : NULL );
+				cla->proxy_hostname = ( cla->proxy_hostname_length > 0 ? cl_val + ( unsigned int )( ULONG_PTR )cla->proxy_hostname : NULL );
+				cla->proxy_username = ( cla->proxy_username_length > 0 ? cl_val + ( unsigned int )( ULONG_PTR )cla->proxy_username : NULL );
+				cla->proxy_password = ( cla->proxy_password_length > 0 ? cl_val + ( unsigned int )( ULONG_PTR )cla->proxy_password : NULL );
 
 				CL_ARGS *new_cla = ( CL_ARGS * )GlobalAlloc( GMEM_FIXED, sizeof( CL_ARGS ) );
 				_memcpy_s( new_cla, sizeof( CL_ARGS ), cla, sizeof( CL_ARGS ) );

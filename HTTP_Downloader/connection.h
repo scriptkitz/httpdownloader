@@ -186,6 +186,7 @@ enum IO_OPERATION
 	IO_Shutdown,
 	IO_Close,
 	IO_KeepAlive,
+	IO_Reallocate,
 	IO_SFTPReadContent,
 	IO_SFTPWriteContent,
 	IO_SFTPResumeInit,
@@ -325,6 +326,7 @@ struct SOCKET_CONTEXT
 	OVERLAPPEDEX		overlapped;
 	OVERLAPPEDEX		overlapped_close;
 	OVERLAPPEDEX		overlapped_keep_alive;
+	OVERLAPPEDEX		overlapped_reallocate;	// Used to post a dynamic part-split request to the worker thread.
 
 	DoublyLinkedList	context_node;	// Self reference to the g_context_list.
 	DoublyLinkedList	parts_node;		// Self reference to the parts_list of this context's download_info.
@@ -367,6 +369,7 @@ struct SOCKET_CONTEXT
 	unsigned int		ssh_state;
 
 	volatile LONG		pending_operations;
+	volatile LONG		split_requested;	// Set when a dynamic part-split (IO_Reallocate) has been posted for this context.
 	volatile LONG		timeout;
 	volatile LONG		keep_alive_timeout;
 
@@ -485,6 +488,8 @@ struct DOWNLOAD_INFO
 
 DWORD WINAPI IOCPDownloader( LPVOID pArgs );
 DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext );
+
+void SplitLargestPart( DOWNLOAD_INFO *di );
 
 void StopIOCPDownloader();
 

@@ -402,6 +402,9 @@
 
 #endif
 
+// The Windows 10 SDK (10.0.14393+) defines MONITOR_DPI_TYPE in shellscalingapi.h.
+#if !defined( NTDDI_WIN10_RS1 ) || ( NTDDI_VERSION < NTDDI_WIN10_RS1 )
+
 typedef enum MONITOR_DPI_TYPE
 {
 	MDT_EFFECTIVE_DPI = 0,
@@ -409,6 +412,13 @@ typedef enum MONITOR_DPI_TYPE
 	MDT_RAW_DPI = 2,
 	MDT_DEFAULT
 };
+
+#else
+
+// WIN32_LEAN_AND_MEAN keeps shellscalingapi.h out of windows.h, so include it explicitly.
+#include <shellscalingapi.h>
+
+#endif
 
 typedef UINT ( WINAPI *pGetDpiForWindow )( HWND hWnd );
 typedef BOOL ( WINAPI *pSystemParametersInfoForDpi )( UINT uiAction, UINT uiParam, PVOID pvParam, UINT fWinIni, UINT dpi );

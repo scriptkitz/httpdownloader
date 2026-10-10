@@ -1,0 +1,8 @@
+_vsbuild/
+x64/
+.vs/
+*.user
+vc140.pdb
+UpgradeLog.htm
+HTTP_Downloader/
+.workbuddy/

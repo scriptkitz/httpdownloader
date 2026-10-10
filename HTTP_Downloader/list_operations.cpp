@@ -148,7 +148,7 @@ void SetContextStatus( SOCKET_CONTEXT *context, unsigned int status )
 
 THREAD_RETURN remove_items( void *pArguments )
 {
-	unsigned char handle_type = ( unsigned char )pArguments;	// 0 = remove, 1 = remove and delete
+	unsigned char handle_type = ( unsigned char )( ULONG_PTR )pArguments;	// 0 = remove, 1 = remove and delete
 
 	unsigned int status = ( handle_type == 1 ? STATUS_DELETE : STATUS_NONE );
 
@@ -709,7 +709,7 @@ THREAD_RETURN remove_items( void *pArguments )
 
 THREAD_RETURN handle_download_list( void *pArguments )
 {
-	unsigned char handle_type = ( unsigned char )pArguments;
+	unsigned char handle_type = ( unsigned char )( ULONG_PTR )pArguments;
 
 	EnterCriticalSection( &worker_cs );
 
@@ -1351,7 +1351,7 @@ THREAD_RETURN handle_download_list( void *pArguments )
 
 THREAD_RETURN handle_connection( void *pArguments )
 {
-	unsigned int status = ( unsigned int )pArguments;
+	unsigned int status = ( unsigned int )( ULONG_PTR )pArguments;
 
 	EnterCriticalSection( &worker_cs );
 
@@ -2320,7 +2320,7 @@ THREAD_RETURN handle_connection( void *pArguments )
 
 THREAD_RETURN handle_download_queue( void *pArguments )
 {
-	unsigned char handle_type = ( unsigned char )pArguments;
+	unsigned char handle_type = ( unsigned char )( ULONG_PTR )pArguments;
 
 	EnterCriticalSection( &worker_cs );
 

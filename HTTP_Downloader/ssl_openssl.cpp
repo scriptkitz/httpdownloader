@@ -49,7 +49,7 @@ void InitializeSSL_CTXs()
 					  _SSL_CTX_set_session_cache_mode != NULL )	// BoringSSL functions.
 			{
 				_SSL_CTX_set_min_proto_version( g_client_ssl_ctx[ index ], 0 );
-				_SSL_CTX_set_max_proto_version( g_client_ssl_ctx[ index ], ( uint16_t )protocol );
+				_SSL_CTX_set_max_proto_version( g_client_ssl_ctx[ index ], ( uint16_t )protocol[ index ] );
 
 				_SSL_CTX_set_session_cache_mode( g_client_ssl_ctx[ index ], SSL_SESS_CACHE_CLIENT );
 			}

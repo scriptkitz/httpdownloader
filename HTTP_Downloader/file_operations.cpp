@@ -85,10 +85,10 @@ RETRY_OPEN:
 					char *cfg_buf = ( char * )GlobalAlloc( GMEM_FIXED, sizeof( char ) * fz + 1 );
 					if ( cfg_buf != NULL )
 					{
-						BOOL bRet = ReadFile( hFile_cfg, cfg_buf, sizeof( char ) * fz, &read, NULL );
+						BOOL bRet2 = ReadFile( hFile_cfg, cfg_buf, sizeof( char ) * fz, &read, NULL );
 
 						// Read the config. It must be in the order specified below.
-						if ( bRet != FALSE && read == fz )
+						if ( bRet2 != FALSE && read == fz )
 						{
 							cfg_buf[ fz ] = 0;	// Guarantee a NULL terminated buffer.
 
