@@ -242,6 +242,7 @@ struct CL_ARGS
 	bool use_download_speed_limit;
 	bool use_download_directory;
 	bool use_parts;
+	unsigned char debug_set_parts;		// Logger build only: mid-download parts change request for the test harness (0 = unused).
 };
 
 struct FONT_SETTINGS

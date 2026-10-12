@@ -373,6 +373,11 @@ struct SOCKET_CONTEXT
 	volatile LONG		timeout;
 	volatile LONG		keep_alive_timeout;
 
+	// NOTE: The speed-limit token bucket is intentionally NOT per-connection. It lives on
+	// DOWNLOAD_INFO (the shared_info all parts reference) so that every concurrent part/connection
+	// of one download draws from a single bucket and the effective throughput is genuinely
+	// limited to 'download_speed_limit' bytes/s (see ThrottleClampRecv in connection.cpp).
+
 	char				content_status;
 
 	unsigned char		ftp_connection_type;
@@ -484,6 +489,24 @@ struct DOWNLOAD_INFO
 	unsigned char		moving_state;		// 0 = None, 1 = Moving, 2 = Cancelling
 	unsigned char		hosts;
 	unsigned char		active_hosts;
+
+	// --- Per-download speed-limit token bucket (shared by ALL parts/connections). ---
+	// Every part/connection of one download draws from this single bucket, so the effective
+	// throughput is genuinely limited to 'download_speed_limit' bytes/s regardless of how many
+	// concurrent parts are transferring. This is what makes --speed-limit a TOTAL download rate,
+	// not a per-chunk rate. Access is serialized by di_cs.
+	unsigned long long	throttle_next_release;	// GetTickCount64() of the next token-bucket refill boundary (also pauses the connection-timeout while we're intentionally waiting).
+	unsigned long long	throttle_budget;		// Token-bucket bytes available to transfer in the current throttle window.
+
+	// --- Throttle debug-logging state (logger mode only). WriteLog is internally gated by
+	//     g_can_log/g_log_filter, so these are harmless when logging is disabled. They let us
+	//     emit detailed, change-only throttle traces that stay in the code permanently. ---
+	unsigned long long	throttle_log_limit;		// Last effective limit (bytes/s) we logged (0 = not yet).
+	unsigned long long	throttle_log_bpw;		// Last bytes-per-window value we logged (suppresses steady-state refill spam).
+	unsigned long long	throttle_log_window;	// Refill/window counter, used for periodic ~5s summaries.
+	unsigned long long	throttle_log_phase_tick;	// GetTickCount64() of the last wait/active phase log (rate-limits phase logging to ~1/s).
+	int					throttle_log_phase;		// Last logged phase: 0=unknown, 1=active(xfer), 2=waiting(window exhausted).
+	unsigned int		throttle_log_phases_seen;	// Bit0=ACTIVE seen, Bit1=WAIT seen. Guarantees the first occurrence of each phase is logged even if it flips rapidly.
 };
 
 DWORD WINAPI IOCPDownloader( LPVOID pArgs );

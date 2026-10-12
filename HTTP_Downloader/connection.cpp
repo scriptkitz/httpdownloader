@@ -169,6 +169,15 @@ volatile LONG g_status_count[ 17 ] = { 0 };	// 17 states (indices 0 - 16). STATU
 // parts_limit is set when the user adjusts an active download's parts number. 0 means it's not set.
 static unsigned short GetDynamicPartsTarget( DOWNLOAD_INFO *di );
 
+static unsigned long long GetEffectiveSpeedLimit( DOWNLOAD_INFO *di );
+
+// Clamps the next WSARecv to the DOWNLOAD's speed-limit budget (shared by all parts).
+// If the current window's budget is exhausted it sleeps precisely for the refill, then
+// re-checks. Returns the number of bytes the caller should set context->wsabuf.len to
+// before posting the receive. max_len is the largest size the buffer can currently hold
+// (buffer_size minus any offset into the buffer). Always returns at least 1.
+static unsigned long long ThrottleClampRecv( SOCKET_CONTEXT *context, DWORD max_len );
+
 bool g_timers_running = false;
 
 bool g_waiting_for_update = false;
@@ -559,7 +568,20 @@ DWORD WINAPI Timeout( LPVOID /*WorkThreadContext*/ )
 						}
 						else
 						{
-							InterlockedIncrement( &context->timeout );	// Increment the timeout counter.
+							// Don't count down the timeout while the download is waiting on its
+							// speed-limit window. The window is supposed to pause the transfer.
+							// The bucket is per-download (shared_info), so read it from there.
+							DOWNLOAD_INFO *thr_di = ( context->download_info != NULL ?
+													 context->download_info->shared_info : NULL );
+							if ( thr_di != NULL && thr_di->throttle_next_release != 0 &&
+								 GetTickCount64() < thr_di->throttle_next_release )
+							{
+								InterlockedExchange( &context->timeout, 0 );	// Reset timeout counter.
+							}
+							else
+							{
+								InterlockedIncrement( &context->timeout );	// Increment the timeout counter.
+							}
 
 							// See if we've reached the timeout limit.
 							if ( ( context->timeout >= cfg_timeout ) && ( cfg_timeout > 0 ) )
@@ -605,26 +627,34 @@ DWORD WINAPI Timeout( LPVOID /*WorkThreadContext*/ )
 						}
 					}
 
-					// See if we should post a dynamic part-split request for this download.
-					// We'll post an IOCP completion so that the split happens on a worker thread.
-					if ( cfg_reallocate_parts &&
-						 context->download_info != NULL &&
-						 context->download_info->parts > 1 &&
-						 context->status == STATUS_DOWNLOADING &&
-						 context->download_info->active_parts < GetDynamicPartsTarget( context->download_info ) &&
-						 InterlockedCompareExchange( &context->split_requested, 1, 0 ) == 0 )
-					{
-						InterlockedIncrement( &context->pending_operations );
+				LeaveCriticalSection( &context->context_cs );
+			}
 
-						context->overlapped_reallocate.current_operation = IO_Reallocate;
+			// See if we should post a dynamic part-split request for this download.
+			// We'll post an IOCP completion so that the split happens on a worker thread.
+			// NOTE: This decision is made WITHOUT holding context_cs. The speed limiter can
+			// sleep inside ThrottleClampRecv while context_cs is held (pacing a throttled
+			// receive), so a TryEnterCriticalSection here would starve reallocation checks
+			// on throttled downloads. All fields read below are stable during a transfer
+			// (download_info pointer, status, part counts) and the InterlockedCompareExchange
+			// on split_requested prevents duplicate posts; the IO_Reallocate handler re-validates
+			// everything under context_cs.
+		if ( cfg_reallocate_parts &&
+			 context->download_info != NULL &&
+			 context->download_info->parts > 1 &&
+			 context->cleanup == 0 &&
+			 context->status == STATUS_DOWNLOADING &&
+			 context->download_info->active_parts < GetDynamicPartsTarget( context->download_info ) &&
+			 InterlockedCompareExchange( &context->split_requested, 1, 0 ) == 0 )
+		{
+			InterlockedIncrement( &context->pending_operations );
 
-						PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped_reallocate );
-					}
+			context->overlapped_reallocate.current_operation = IO_Reallocate;
 
-					LeaveCriticalSection( &context->context_cs );
-				}
+			PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped_reallocate );
+		}
 
-				context_node = context_node->next;
+			context_node = context_node->next;
 			}
 
 			LeaveCriticalSection( &context_list_cs );
@@ -2116,72 +2146,51 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				}
 				else
 				{
-					bool skip_process = false;
-					bool sleep = false;
+				bool skip_process = false;
 
-					EnterCriticalSection( &context->context_cs );
+				EnterCriticalSection( &context->context_cs );
 
-					if ( IS_STATUS( context->status,
-							STATUS_STOPPED |
-							STATUS_REMOVE |
-							STATUS_RESTART |
-							STATUS_UPDATING ) )	// Stop, Stop and Remove, Restart, or Updating.
+				if ( IS_STATUS( context->status,
+						STATUS_STOPPED |
+						STATUS_REMOVE |
+						STATUS_RESTART |
+						STATUS_UPDATING ) )	// Stop, Stop and Remove, Restart, or Updating.
+				{
+					if ( context->ssh != NULL )
 					{
-						if ( context->ssh != NULL )
+						context->overlapped_close.current_operation = IO_SFTPCleanup;
+					}
+					else
+					{
+						if ( *current_operation != IO_GetContent )
 						{
-							context->overlapped_close.current_operation = IO_SFTPCleanup;
+							// We don't need to shutdown the SSL/TLS connection since it will not have been established yet.
+							*current_operation = IO_Close;
 						}
 						else
 						{
-							if ( *current_operation != IO_GetContent )
-							{
-								// We don't need to shutdown the SSL/TLS connection since it will not have been established yet.
-								*current_operation = IO_Close;
-							}
-							else
-							{
-								*current_operation = ( use_ssl ? IO_Shutdown : IO_Close );
-							}
+							*current_operation = ( use_ssl ? IO_Shutdown : IO_Close );
 						}
 					}
-					else if ( IS_STATUS( context->status, STATUS_PAUSED ) )	// Pause.
-					{
-						context->current_bytes_read = io_size;
+				}
+				else if ( IS_STATUS( context->status, STATUS_PAUSED ) )	// Pause.
+				{
+					context->current_bytes_read = io_size;
 
-						context->is_paused = true;	// Tells us how to stop the download if it's pausing/paused.
+					context->is_paused = true;	// Tells us how to stop the download if it's pausing/paused.
 
-						skip_process = true;
-					}
-					else if ( ( cfg_download_speed_limit > 0 &&
-							  ( g_session_total_downloaded - g_session_last_total_downloaded ) > cfg_download_speed_limit ) ||
-							  ( context->download_info != NULL &&
-							( ( context->download_info->shared_info->download_speed_limit > 0 &&
-							  ( context->download_info->shared_info->downloaded - context->download_info->shared_info->last_downloaded ) > context->download_info->shared_info->download_speed_limit ) ||
-							  ( context->download_info->download_speed_limit > 0 &&
-							  ( context->download_info->downloaded - context->download_info->last_downloaded ) > context->download_info->download_speed_limit ) ) ) ) // Preempt the next receive.
-					{
-						sleep = true;
+					skip_process = true;
+				}
+				// Per-connection speed limiting is applied where the next receive is posted
+				// (see IO_GetContent / IO_ResumeGetContent). Received data is always processed
+				// and written immediately, so the transfer never appears stalled or "done but waiting".
 
-						context->current_bytes_read = io_size;
+				LeaveCriticalSection( &context->context_cs );
 
-						InterlockedIncrement( &context->pending_operations );
-						PostQueuedCompletionStatus( hIOCP, context->current_bytes_read, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
-
-						skip_process = true;
-					}
-
-					LeaveCriticalSection( &context->context_cs );
-
-					// Make sure this isn't in the context's critical section.
-					if ( sleep )
-					{
-						Sleep( 1 );	// Prevents high CPU usage for some reason.
-					}
-
-					if ( skip_process )
-					{
-						continue;
-					}
+				if ( skip_process )
+				{
+					continue;
+				}
 				}
 			}
 		}
@@ -3970,6 +3979,13 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 						}
 						else
 						{
+							// Per-download speed limit: cap how much we request on this receive by
+							// drawing from the shared (per-download) token bucket. ThrottleClampRecv
+							// sleeps precisely until the next refill window when the budget is exhausted.
+							DWORD offset = ( DWORD )( context->wsabuf.buf - context->buffer );
+							DWORD max_len = context->buffer_size - offset;
+							context->wsabuf.len = ( DWORD )ThrottleClampRecv( context, max_len );
+
 							nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 							if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 							{
@@ -4282,6 +4298,10 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								}
 								else
 								{
+									// Per-connection speed limit: cap how much we request on this receive.
+									// wsabuf.buf may be offset (partial data), so clamp against the remaining buffer space.
+									context->wsabuf.len = ( DWORD )ThrottleClampRecv( context, context->buffer_size - ( DWORD )( context->wsabuf.buf - context->buffer ) );
+
 									nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
@@ -4405,6 +4425,9 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							}
 							else
 							{
+								// Per-connection speed limit: cap how much we request on this receive.
+								context->wsabuf.len = ( DWORD )ThrottleClampRecv( context, context->buffer_size - ( DWORD )( context->wsabuf.buf - context->buffer ) );
+
 								nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 								if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 								{
@@ -4435,24 +4458,29 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				bool do_split = false;
 				DOWNLOAD_INFO *di = NULL;
 
-				EnterCriticalSection( &context->context_cs );
+			EnterCriticalSection( &context->context_cs );
 
-				InterlockedExchange( &context->split_requested, 0 );
+			InterlockedExchange( &context->split_requested, 0 );
 
-				if ( context->cleanup == 0 &&
-					 cfg_reallocate_parts &&
-					 context->download_info != NULL &&
-					 context->download_info->parts > 1 &&
-					 context->status == STATUS_DOWNLOADING &&
-					 context->download_info->active_parts < GetDynamicPartsTarget( context->download_info ) )
-				{
-					do_split = true;
-					di = context->download_info;
-				}
+			if ( context->cleanup == 0 &&
+				 cfg_reallocate_parts &&
+				 context->download_info != NULL &&
+				 context->download_info->parts > 1 &&
+				 context->status == STATUS_DOWNLOADING &&
+				 context->download_info->active_parts < GetDynamicPartsTarget( context->download_info ) )
+			{
+				do_split = true;
+				di = context->download_info;
+			}
 
-				LeaveCriticalSection( &context->context_cs );
+			LeaveCriticalSection( &context->context_cs );
 
-				InterlockedDecrement( &context->pending_operations );
+				// NOTE: No InterlockedDecrement here. The universal success path (line ~2113)
+				// already decrements pending_operations for every completed operation. The
+				// original code decremented a second time, which made pending_operations drift
+				// negative when this case actually ran (it was dead code before the
+				// overlapped_reallocate.context initialization was fixed) and caused premature
+				// context frees (use-after-free) during dynamic part-splitting.
 
 				if ( do_split && di != NULL )
 				{
@@ -4628,6 +4656,7 @@ SOCKET_CONTEXT *CreateSocketContext()
 			context->overlapped.context = context;
 			context->overlapped_close.context = context;
 			context->overlapped_keep_alive.context = context;
+			context->overlapped_reallocate.context = context;	// Fix: was never initialized, so the timeout thread's IO_Reallocate post was silently discarded by the worker dispatch (overlapped->context != NULL check).
 
 			InitializeCriticalSection( &context->context_cs );
 		}
@@ -8846,6 +8875,206 @@ static unsigned short GetDynamicPartsTarget( DOWNLOAD_INFO *di )
 	return ( di->parts_limit > 0 ? di->parts_limit : di->parts );
 }
 
+// Speed limiting is enforced as a per-DOWNLOAD token bucket shared by every part/connection of a
+// single download. The bucket lives on the shared DOWNLOAD_INFO (context->download_info->shared_info)
+// and is serialized by di_cs. This makes --speed-limit (and the per-download limit) a TOTAL download
+// rate: if you set 20 KB/s and the file is fetched with 10 concurrent parts, the aggregate throughput
+// is capped at ~20 KB/s (each part averages ~2 KB/s), instead of 20 KB/s PER part. TCP receive is
+// paced by capping each WSARecv's wsabuf.len to the bytes we're allowed to pull this window, so the
+// transfer stays at a steady, non-zero speed and finishes promptly instead of bursting then idling.
+#define THROTTLE_WINDOW_MS 100   // Refill cadence. Smaller = smoother, slightly more overhead.
+
+// Effective speed limit for this download, in bytes/second. 0 means unlimited.
+// di is the SHARED download_info (all parts reference it), so this is the per-download limit.
+static unsigned long long GetEffectiveSpeedLimit( DOWNLOAD_INFO *di )
+{
+	unsigned long long limit = cfg_download_speed_limit;
+	if ( limit == 0 && di != NULL )
+	{
+		limit = di->download_speed_limit;
+	}
+	return limit;
+}
+
+// Clamps the next WSARecv to the download's shared speed-limit budget.
+//
+// The bucket is shared across all parts of the download (stored on di->shared_info), so the aggregate
+// throughput is genuinely limited. Concurrency is serialized by di->di_cs. When the current window's
+// budget is exhausted we sleep precisely until the next refill boundary, then re-check (at most one
+// sleep per call). Returns the number of bytes the caller should set context->wsabuf.len to; max_len is
+// the largest size the buffer can currently hold. Always returns at least 1 so the IOCP pump stays alive.
+static unsigned long long ThrottleClampRecv( SOCKET_CONTEXT *context, DWORD max_len )
+{
+	DOWNLOAD_INFO *di = ( context->download_info != NULL ? context->download_info->shared_info : NULL );
+
+	// If we have no shared download info (shouldn't happen for a live transfer), don't throttle.
+	if ( di == NULL )
+	{
+		return (unsigned long long)max_len;
+	}
+
+	unsigned long long limit = GetEffectiveSpeedLimit( di );
+
+	// --- Permanent throttle debug logging (logger mode only). ---
+	// WriteLog is internally gated by g_can_log/g_log_filter, so this is a no-op unless logging is
+	// enabled. We only log when something meaningful changes (effective limit, bytes-per-window refill
+	// size, or wait/active phase) to avoid high-frequency duplicate lines. This trace is intended to
+	// stay in the code permanently for debugging pacing.
+	{
+		const char *src;
+		if ( cfg_download_speed_limit > 0 )
+			src = "cfg_download_speed_limit";
+		else if ( di->download_speed_limit > 0 )
+			src = "shared_info->download_speed_limit";
+		else
+			src = "none(unlimited)";
+
+		// Log whenever the effective limit changes (first time, or a live change mid-download).
+		if ( limit != di->throttle_log_limit )
+		{
+#ifdef ENABLE_LOGGING
+			WriteLog( LOG_INFO_CON_STATE,
+				"[THROTTLE] limit=%llu bytes/s (source=%s) di=%p window_ms=%d",
+				limit, src, (void *)di, THROTTLE_WINDOW_MS );
+#endif
+			di->throttle_log_limit = limit;
+			di->throttle_log_bpw = (unsigned long long)-1; // force a refill-detail log on next refill
+			di->throttle_log_phase = 0;                   // force a phase log on next transition
+			di->throttle_log_phases_seen = 0;             // re-log ACTIVE/WAIT phases for the new limit
+		}
+	}
+
+	if ( limit == 0 )
+	{
+		// Unlimited: keep next_release at 0 so the timeout thread doesn't treat us as window-paused,
+		// and request the whole buffer.
+		EnterCriticalSection( &di->di_cs );
+		di->throttle_next_release = 0;
+		LeaveCriticalSection( &di->di_cs );
+		return (unsigned long long)max_len;
+	}
+
+	for ( ;; )
+	{
+		EnterCriticalSection( &di->di_cs );
+		ULONGLONG now = GetTickCount64();
+
+		if ( now >= di->throttle_next_release )
+		{
+			unsigned long long bytes_per_window = ( limit * THROTTLE_WINDOW_MS ) / 1000;
+			if ( bytes_per_window == 0 )
+			{
+				// Floor so an extremely low limit still makes forward progress.
+				bytes_per_window = 1;
+			}
+
+			// Cap accumulated budget so a brief stall (pause, seek, etc.) can't build up a large burst.
+			unsigned long long budget_cap = bytes_per_window * 4;
+			if ( di->throttle_budget > budget_cap )
+			{
+				di->throttle_budget = budget_cap;
+			}
+			di->throttle_budget += bytes_per_window;
+			if ( di->throttle_budget > budget_cap )
+			{
+				di->throttle_budget = budget_cap;
+			}
+
+			// Advance the refill boundary. We deliberately KEEP this as a future timestamp during
+			// active transfers: it drives the per-window pacing and tells the connection-timeout
+			// thread that we are intentionally in-window (not stalled). It is only reset to 0 for
+			// the unlimited (limit==0) case above.
+			di->throttle_next_release = now + THROTTLE_WINDOW_MS;
+
+			// Log refill details only when the per-window grant size changes (steady state is silent).
+			if ( bytes_per_window != di->throttle_log_bpw )
+			{
+#ifdef ENABLE_LOGGING
+				WriteLog( LOG_INFO_CON_STATE,
+					"[THROTTLE] refill: budget=%llu (+%llu/window, cap=%llu) next_release_in=%llu ms",
+					di->throttle_budget, bytes_per_window, budget_cap,
+					(unsigned long long)( di->throttle_next_release - GetTickCount64() ) );
+#endif
+				di->throttle_log_bpw = bytes_per_window;
+			}
+
+			// Periodic summary every 50 windows (~5s at 100ms window) for a low-volume progress trail.
+			di->throttle_log_window++;
+			if ( di->throttle_log_window % 50 == 0 )
+			{
+#ifdef ENABLE_LOGGING
+				WriteLog( LOG_INFO_CON_STATE,
+					"[THROTTLE] summary: window#%llu budget=%llu(+%llu/window) phase=%s",
+					di->throttle_log_window, di->throttle_budget, bytes_per_window,
+					( di->throttle_budget == 0 ? "waiting" : "active" ) );
+#endif
+			}
+		}
+
+		if ( di->throttle_budget > 0 )
+		{
+			unsigned long long want = (unsigned long long)max_len;
+			if ( want > di->throttle_budget )
+			{
+				want = di->throttle_budget;
+			}
+			di->throttle_budget -= want;
+
+			// Resumed/active transfer: log the phase transition (rate-limited to ~1/s).
+			if ( di->throttle_log_phase != 1 )
+			{
+				ULONGLONG t = GetTickCount64();
+				// Log the phase transition (rate-limited to ~1/s once it's been seen once, but
+				// always log the very first time we enter ACTIVE so the state is never invisible).
+				if ( ( di->throttle_log_phases_seen & 0x1 ) == 0 ||
+					 ( t - di->throttle_log_phase_tick ) > 1000 )
+				{
+#ifdef ENABLE_LOGGING
+					WriteLog( LOG_INFO_CON_STATE,
+						"[THROTTLE] ACTIVE: granted=%llu budget_left=%llu",
+						want, di->throttle_budget );
+#endif
+					di->throttle_log_phase_tick = t;
+					di->throttle_log_phases_seen |= 0x1;
+				}
+				di->throttle_log_phase = 1;
+			}
+
+			LeaveCriticalSection( &di->di_cs );
+			return want;
+		}
+
+		// No budget left this window: sleep until the next refill boundary, then retry.
+		ULONGLONG wait_until = di->throttle_next_release;
+		if ( di->throttle_log_phase != 2 )
+		{
+			ULONGLONG t = GetTickCount64();
+			// Always log the first WAIT so the window-exhausted state is visible; afterwards
+			// rate-limit to ~1/s so a fast ACTIVE<->WAIT flip-flop doesn't spam the log.
+			if ( ( di->throttle_log_phases_seen & 0x2 ) == 0 ||
+				 ( t - di->throttle_log_phase_tick ) > 1000 )
+			{
+#ifdef ENABLE_LOGGING
+				WriteLog( LOG_INFO_CON_STATE,
+					"[THROTTLE] WAIT: budget exhausted, sleeping ~%llu ms until next window",
+					(unsigned long long)( wait_until - t ) );
+#endif
+				di->throttle_log_phase_tick = t;
+				di->throttle_log_phases_seen |= 0x2;
+			}
+			di->throttle_log_phase = 2;
+		}
+		LeaveCriticalSection( &di->di_cs );
+
+		LONG64 wait_ms = ( LONG64 )( wait_until - GetTickCount64() );
+		if ( wait_ms > 0 )
+		{
+			Sleep( ( DWORD )wait_ms );
+		}
+		// Loop: after sleeping we re-enter the lock, the window will have refilled, and we grant bytes.
+	}
+}
+
 void SplitLargestPart( DOWNLOAD_INFO *di )
 {
 	if ( di == NULL )
@@ -9010,6 +9239,16 @@ void SplitLargestPart( DOWNLOAD_INFO *di )
 							new_context->download_info = di;
 
 							++( di->active_parts );
+
+#ifdef ENABLE_LOGGING
+							// Permanent debug trace for the test harness: each successful dynamic
+							// part-split is logged once (splits happen at most once per timeout tick).
+							WriteLog( LOG_INFO_CON_STATE,
+								"[PARTS] split: active_parts=%u target=%u parts=%u split_remaining=%llu",
+								di->active_parts,
+								( di->parts_limit > 0 ? di->parts_limit : di->parts ),
+								di->parts, remaining_size );
+#endif
 
 							// Find the reallocated context's range_info node.
 							DoublyLinkedList *reallocated_range_node = di->range_list;
@@ -9479,6 +9718,18 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 						else
 						{
 							--di->active_parts;
+
+#ifdef ENABLE_LOGGING
+							// Permanent debug trace: log the final wind-down phase when the parts
+							// target was lowered mid-download (parts_limit > 0). Only the tail is
+							// logged (active_parts <= parts_limit) to avoid high-frequency lines.
+							if ( di->parts_limit > 0 && di->active_parts <= di->parts_limit )
+							{
+								WriteLog( LOG_INFO_CON_STATE,
+									"[PARTS] part finished: active_parts=%u target=%u parts=%u (wind-down)",
+									di->active_parts, di->parts_limit, di->parts );
+							}
+#endif
 
 							++shared_active_parts;
 

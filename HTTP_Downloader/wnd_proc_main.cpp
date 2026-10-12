@@ -1421,6 +1421,108 @@ wchar_t *GetDownloadInfoString( DOWNLOAD_INFO *di, int column, int root_index, i
 	return buf;
 }
 
+#ifdef ENABLE_LOGGING
+// Debug-only (logger build) test-harness hook: change the parts count of an ACTIVE download
+// mid-download. A second instance is launched with --debug-set-parts <N> --url <url>; the
+// single-instance forwarder delivers the CL_ARGS here (WM_COPYDATA -> WM_PROPAGATE), and instead
+// of adding a new download we adjust the matching download's parts target and let the existing
+// reallocation machinery (SplitLargestPart / parts winding down as they finish) apply the change.
+static void DebugSetParts( CL_ARGS *cla )
+{
+	if ( cla == NULL || cla->debug_set_parts == 0 || cla->urls == NULL )
+	{
+		return;
+	}
+
+	// 255 = "reset" request (--debug-set-parts reset): restore the global reallocation
+	// settings to their defaults. Used to clean up after a test session because the app
+	// persists cfg_reallocate_parts to the user's settings file.
+	if ( cla->debug_set_parts == 255 )
+	{
+		cfg_reallocate_parts = false;
+		cfg_reallocate_threshold_size = 1048576;	// 1 MB production default.
+
+		WriteLog( LOG_INFO_CON_STATE, "[DEBUG-SET-PARTS] reset: cfg_reallocate_parts=false threshold=1048576" );
+
+		return;
+	}
+
+	unsigned char new_parts = cla->debug_set_parts;
+	if ( new_parts > 100 )
+	{
+		new_parts = 100;
+	}
+	if ( new_parts < 1 )
+	{
+		new_parts = 1;
+	}
+
+	// The forwarded urls string may contain multiple URLs separated by \r\n. Use the first one.
+	wchar_t match_url[ MAX_PATH ];
+	match_url[ 0 ] = 0;
+	{
+		const wchar_t *p = cla->urls;
+		int i = 0;
+		while ( *p != 0 && *p != L'\r' && *p != L'\n' && i < MAX_PATH - 1 )
+		{
+			match_url[ i++ ] = *p++;
+		}
+		match_url[ i ] = 0;
+	}
+	if ( match_url[ 0 ] == 0 )
+	{
+		return;
+	}
+
+	// Enable the live reallocation machinery and relax the split threshold (production floor is
+	// 1 MB, which would cap how finely a small test file can be split) for this test session.
+	cfg_reallocate_parts = true;
+	cfg_reallocate_threshold_size = 65536;	// 64 KB.
+
+	unsigned int matched = 0;
+
+	EnterCriticalSection( &active_download_list_cs );
+
+	DoublyLinkedList *download_node = active_download_list;
+	while ( download_node != NULL )
+	{
+		DOWNLOAD_INFO *di = ( DOWNLOAD_INFO * )download_node->data;
+		if ( di != NULL && di->url != NULL && lstrcmpiW( di->url, match_url ) == 0 )
+		{
+			EnterCriticalSection( &di->di_cs );
+
+			unsigned short old_parts = di->parts;
+			unsigned char old_limit = di->parts_limit;
+
+			// Target for the reallocation machinery:
+			//   increase -> SplitLargestPart grows active_parts up to the limit (timeout thread).
+			//   decrease -> finished parts are not replaced and active_parts winds down on its own.
+			di->parts_limit = new_parts;
+			if ( new_parts > di->parts )
+			{
+				di->parts = new_parts;	// Allow splitting past the original part count.
+			}
+
+			LeaveCriticalSection( &di->di_cs );
+
+			WriteLog( LOG_INFO_CON_STATE,
+				"[DEBUG-SET-PARTS] url=%S limit %u->%u parts %u->%u",
+				match_url, old_limit, new_parts, old_parts, di->parts );
+
+			++matched;
+		}
+
+		download_node = download_node->next;
+	}
+
+	LeaveCriticalSection( &active_download_list_cs );
+
+	WriteLog( LOG_INFO_CON_STATE,
+		"[DEBUG-SET-PARTS] requested parts=%u, matched %u active download(s)",
+		new_parts, matched );
+}
+#endif
+
 LRESULT CALLBACK MainWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam )
 {
 	switch ( msg )
@@ -2847,6 +2949,19 @@ LRESULT CALLBACK MainWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam 
 
 				if ( cla != NULL )
 				{
+#ifdef ENABLE_LOGGING
+					// Debug-only (logger build): a second instance forwarded --debug-set-parts.
+					// Adjust the matching active download's parts instead of adding a new download.
+					if ( cla->debug_set_parts > 0 )
+					{
+						DebugSetParts( cla );
+
+						FreeCommandLineArgs( &cla );
+
+						return TRUE;
+					}
+#endif
+
 					// cla is freed in process_command_line_args.
 					HANDLE thread = ( HANDLE )_CreateThread( NULL, 0, process_command_line_args, ( void * )cla, 0, NULL );
 					if ( thread != NULL )

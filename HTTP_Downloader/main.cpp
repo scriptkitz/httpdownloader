@@ -320,6 +320,32 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 					cla->parts = parts;
 					cla->use_parts = true;
 				}
+#ifdef ENABLE_LOGGING
+				else if ( ( arg + 1 ) < argCount &&
+						  arg_name_length == 15 && _StrCmpNIW( arg_name, L"debug-set-parts", 15 ) == 0 )	// Test harness: change the parts count of an ACTIVE download (forwarded to the running instance).
+				{
+					++arg;
+
+					if ( _StrCmpNIW( szArgList[ arg ], L"reset", 5 ) == 0 )
+					{
+						cla->debug_set_parts = 255;	// Restore reallocation defaults.
+					}
+					else
+					{
+						unsigned int new_parts = _wcstoul( szArgList[ arg ], NULL, 10 );
+						if ( new_parts > 100 )
+						{
+							new_parts = 100;
+						}
+						else if ( new_parts == 0 )
+						{
+							new_parts = 1;
+						}
+
+						cla->debug_set_parts = ( unsigned char )new_parts;
+					}
+				}
+#endif
 				else if ( ( arg + 1 ) < argCount &&
 						  arg_name_length == 11 && _StrCmpNIW( arg_name, L"speed-limit", 11 ) == 0 )	// Download speed limit.
 				{
@@ -898,6 +924,13 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 	InitializeLocaleValues();
 
 	read_config();
+
+#ifdef ENABLE_LOGGING
+	// Permanent logger-mode debug trace: shows the reallocation settings that were loaded,
+	// so the test harness can verify a debug reset was persisted.
+	WriteLog( LOG_INFO_CON_STATE, "[DEBUG] startup config: cfg_reallocate_parts=%d cfg_reallocate_threshold_size=%llu",
+		( int )cfg_reallocate_parts, cfg_reallocate_threshold_size );
+#endif
 
 	if ( !override_shutdown_action )
 	{
