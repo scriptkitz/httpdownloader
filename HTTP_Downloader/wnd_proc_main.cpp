@@ -1043,11 +1043,27 @@ wchar_t *GetDownloadInfoString( DOWNLOAD_INFO *di, int column, int root_index, i
 
 		case COLUMN_DOWNLOAD_SPEED:
 		{
+			unsigned long long display_speed = 0;
+			bool show_speed = false;
+
 			if ( IS_STATUS( di->status, STATUS_DOWNLOADING ) )
+			{
+				display_speed = di->speed;
+				show_speed = true;
+			}
+			else if ( di->status == STATUS_COMPLETED && di->speed > 0 )
+			{
+				// Keep the last speed after completion instead of clearing the column.
+				// (The cleanup path preserves the final speed, falling back to the average.)
+				display_speed = di->speed;
+				show_speed = true;
+			}
+
+			if ( show_speed )
 			{
 				buf = tbuf;	// Reset the buffer pointer.
 
-				unsigned int length = FormatSizes( buf, tbuf_size, cfg_t_down_speed, di->speed );
+				unsigned int length = FormatSizes( buf, tbuf_size, cfg_t_down_speed, display_speed );
 				buf[ length++ ] = L'/';
 				buf[ length++ ] = L's';
 				buf[ length ] = 0;
@@ -1072,7 +1088,7 @@ wchar_t *GetDownloadInfoString( DOWNLOAD_INFO *di, int column, int root_index, i
 			}
 			else
 			{
-				buf = L"";
+				buf = L"\x221E\0";	// No limit: show the infinity symbol instead of an empty string.
 			}
 		}
 		break;
@@ -1375,7 +1391,9 @@ wchar_t *GetDownloadInfoString( DOWNLOAD_INFO *di, int column, int root_index, i
 			{
 				unsigned long long time_length = ( column == COLUMN_TIME_ELAPSED ? di->time_elapsed : di->time_remaining );
 
-				if ( IS_STATUS( di->status, STATUS_DOWNLOADING ) || time_length > 0 )
+				// Keep the values after completion instead of clearing the columns:
+				// elapsed shows the total download time and remaining shows its final value (0 once done).
+				if ( IS_STATUS( di->status, STATUS_DOWNLOADING | STATUS_COMPLETED ) || time_length > 0 )
 				{
 					buf = tbuf;	// Reset the buffer pointer.
 

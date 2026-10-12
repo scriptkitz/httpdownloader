@@ -9842,7 +9842,6 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 							LeaveCriticalSection( &active_download_list_cs );
 
 							di->time_remaining = 0;
-							di->speed = 0;
 
 							FILETIME ft;
 							GetSystemTimeAsFileTime( &ft );
@@ -9851,6 +9850,20 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 							current_time.LowPart = ft.dwLowDateTime;
 
 							di->time_elapsed = ( current_time.QuadPart - di->start_time.QuadPart ) / FILETIME_TICKS_PER_SECOND;
+
+							// Keep the last sampled speed for the completed item instead of clearing
+							// it. If the final sample was 0 (no progress in the last second), fall
+							// back to the overall average speed.
+							if ( di->speed == 0 && di->downloaded > 0 )
+							{
+								di->speed = ( di->time_elapsed > 0 ? di->downloaded / di->time_elapsed : di->downloaded );
+							}
+
+#ifdef ENABLE_LOGGING
+							// Permanent debug trace: final display values kept for the completed item.
+							WriteLog( LOG_INFO_CON_STATE, "[DONE] speed=%llu elapsed=%llu remaining=%llu | %S",
+								di->speed, di->time_elapsed, di->time_remaining, di->url );
+#endif
 
 							// Stop and Remove.
 							if ( IS_STATUS( context->status, STATUS_REMOVE ) )
@@ -10059,9 +10072,16 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 									LeaveCriticalSection( &active_download_list_cs );
 
 									shared_info->time_remaining = 0;
-									shared_info->speed = 0;
 
 									shared_info->time_elapsed = ( current_time.QuadPart - shared_info->start_time.QuadPart ) / FILETIME_TICKS_PER_SECOND;
+
+									// Keep the last sampled speed for the completed item instead of
+									// clearing it. If the final sample was 0 (no progress in the last
+									// second), fall back to the overall average speed.
+									if ( shared_info->speed == 0 && shared_info->downloaded > 0 )
+									{
+										shared_info->speed = ( shared_info->time_elapsed > 0 ? shared_info->downloaded / shared_info->time_elapsed : shared_info->downloaded );
+									}
 								}
 								else
 								{
