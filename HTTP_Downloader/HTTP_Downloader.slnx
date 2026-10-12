@@ -1,0 +1,12 @@
+<Solution>
+  <Configurations>
+    <BuildType Name="Debug" />
+    <BuildType Name="Debug Dark Mode" />
+    <BuildType Name="Release" />
+    <BuildType Name="Release Dark Mode" />
+    <BuildType Name="Release Logging Support" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="HTTP_Downloader.vcxproj" Id="d3743cb6-cfb6-4d61-a955-662cfffa4c54" />
+</Solution>
