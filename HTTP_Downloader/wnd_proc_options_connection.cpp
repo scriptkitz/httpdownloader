@@ -587,13 +587,13 @@ LRESULT CALLBACK ConnectionTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARA
 							_SendMessageA( ( HWND )lParam, EM_SETSEL, sel_start, sel_start );
 						}
 
-						if ( num < 1048576 )	// 1 MB
+						if ( num < 1024 )	// 1 KB minimum.
 						{
-							num = 1048576;
+							num = 1024;
 
 							_SendMessageA( ( HWND )lParam, EM_GETSEL, ( WPARAM )&sel_start, NULL );
 
-							_SendMessageA( ( HWND )lParam, WM_SETTEXT, 0, ( LPARAM )"1048576" );
+							_SendMessageA( ( HWND )lParam, WM_SETTEXT, 0, ( LPARAM )"1024" );
 
 							_SendMessageA( ( HWND )lParam, EM_SETSEL, sel_start, sel_start );
 						}

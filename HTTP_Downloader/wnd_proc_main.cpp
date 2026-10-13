@@ -1457,10 +1457,10 @@ static void DebugSetParts( CL_ARGS *cla )
 	// persists cfg_reallocate_parts to the user's settings file.
 	if ( cla->debug_set_parts == 255 )
 	{
-		cfg_reallocate_parts = false;
-		cfg_reallocate_threshold_size = 1048576;	// 1 MB production default.
+		cfg_reallocate_parts = true;	// Enabled by default.
+		cfg_reallocate_threshold_size = 1048576;	// 1 MB default threshold.
 
-		WriteLog( LOG_INFO_CON_STATE, "[DEBUG-SET-PARTS] reset: cfg_reallocate_parts=false threshold=1048576" );
+		WriteLog( LOG_INFO_CON_STATE, "[DEBUG-SET-PARTS] reset: cfg_reallocate_parts=true threshold=1048576" );
 
 		return;
 	}

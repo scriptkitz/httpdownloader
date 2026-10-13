@@ -137,7 +137,7 @@ unsigned char cfg_retry_parts_count = 0;
 unsigned char cfg_default_ssl_version = 4;	// Default is TLS 1.2.
 unsigned char cfg_default_download_parts = 1;
 
-bool cfg_reallocate_parts = false;
+bool cfg_reallocate_parts = true;	// Dynamic part reallocation is enabled by default.
 unsigned long long cfg_reallocate_threshold_size = 1048576;
 
 unsigned char cfg_max_redirects = 10;

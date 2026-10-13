@@ -1107,9 +1107,9 @@ RETRY_OPEN:
 								cfg_max_redirects = 100;
 							}
 
-							if ( cfg_reallocate_threshold_size < 1048576 )	// 1 MB
+							if ( cfg_reallocate_threshold_size < 1024 )	// 1 KB minimum.
 							{
-								cfg_reallocate_threshold_size = 1048576;
+								cfg_reallocate_threshold_size = 1024;
 							}
 
 							if ( cfg_thread_count > g_max_threads )
