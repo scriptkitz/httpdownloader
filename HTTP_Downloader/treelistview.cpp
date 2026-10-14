@@ -6387,19 +6387,29 @@ LRESULT CALLBACK TreeListViewWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM
 					else
 					{
 						DOWNLOAD_INFO *di = ( DOWNLOAD_INFO * )tli_node->data;
-						if ( di != NULL &&
-							 IS_STATUS( di->status,
-								STATUS_CONNECTING |
-								STATUS_DOWNLOADING |
-								STATUS_COMPLETED |
+						if ( di != NULL )
+						{
+							// Double-click behavior by status:
+							// completed -> open the file; downloading/connecting -> pause;
+							// other states keep the original behavior (Update Download dialog).
+							if ( IS_STATUS( di->status, STATUS_COMPLETED ) )
+							{
+								HandleCommand( hWnd, MENU_OPEN_FILE );
+							}
+							else if ( IS_STATUS( di->status, STATUS_DOWNLOADING | STATUS_CONNECTING ) )
+							{
+								HandleCommand( hWnd, MENU_PAUSE );
+							}
+							else if ( IS_STATUS( di->status,
 								STATUS_STOPPED |
 								STATUS_TIMED_OUT |
 								STATUS_FAILED |
 								STATUS_SKIPPED |
 								STATUS_AUTH_REQUIRED |
 								STATUS_PROXY_AUTH_REQUIRED ) )
-						{
-							HandleCommand( hWnd, MENU_UPDATE_DOWNLOAD );
+							{
+								HandleCommand( hWnd, MENU_UPDATE_DOWNLOAD );
+							}
 						}
 					}
 				}

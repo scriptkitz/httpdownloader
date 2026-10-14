@@ -499,7 +499,10 @@ LRESULT CALLBACK URLDropWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
 
 		case WM_LBUTTONDBLCLK:
 		{
-			_SendMessageW( g_hWnd_main, WM_COMMAND, MENU_ADD_URLS, 0 );
+			// Double-click opens the main window instead of the Add URLs dialog.
+			// SW_SHOWNORMAL also restores it if it's minimized (including minimized to tray).
+			_ShowWindow( g_hWnd_main, SW_SHOWNORMAL );
+			_SetForegroundWindow( g_hWnd_main );
 
 			return 0;
 		}
