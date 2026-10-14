@@ -892,10 +892,12 @@ THREAD_RETURN IOCPDownloader( void * /*pArguments*/ )
 		goto HARD_CLEANUP;
 	}
 
-	for ( unsigned int i = 0; i < dwThreadCount; ++i )
-	{
-		g_ThreadHandles[ i ] = INVALID_HANDLE_VALUE;
-	}
+	// NOTE: Do not write this as a fill loop. MSVC /O2 loop idiom recognition turns a
+	// "set every element to INVALID_HANDLE_VALUE (all 0xFF bytes)" loop into a call to the
+	// CRT memset symbol, which breaks the no-CRT link of the VS Release configuration.
+	// _memset is the dynamically bound function pointer (call qword ptr [?_memset@@...]),
+	// so it produces no CRT symbol reference.
+	_memset( g_ThreadHandles, 0xFF, sizeof( HANDLE ) * dwThreadCount );
 
 	g_cleanup_event[ 0 ] = _WSACreateEvent();
 	if ( g_cleanup_event[ 0 ] == WSA_INVALID_EVENT )

@@ -662,37 +662,39 @@ void InitializeLocaleValues()
 
 	//_memzero( g_locale_table, sizeof( STRING_TABLE_DATA ) * TOTAL_LOCALE_STRINGS );
 
-	unsigned char i;
-
-	for ( i = 0; i < MONTH_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = month_string_table[ i ]; }
-	for ( i = 0; i < DAY_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = day_string_table[ i ]; }
-	for ( i = 0; i < DOWNLOAD_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = download_string_table[ i ]; }
-	for ( i = 0; i < MENU_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = menu_string_table[ i ]; }
-	for ( i = 0; i < OPTIONS_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = options_string_table[ i ]; }
-	for ( i = 0; i < OPTIONS_ADVANCED_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = options_advanced_string_table[ i ]; }
-	for ( i = 0; i < OPTIONS_APPEARANCE_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = options_appearance_string_table[ i ]; }
-	for ( i = 0; i < OPTIONS_CONNECTION_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = options_connection_string_table[ i ]; }
-	for ( i = 0; i < OPTIONS_FTP_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = options_ftp_string_table[ i ]; }
-	for ( i = 0; i < OPTIONS_GENERAL_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = options_general_string_table[ i ]; }
-	for ( i = 0; i < OPTIONS_PROXY_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = options_proxy_string_table[ i ]; }
-	for ( i = 0; i < OPTIONS_SERVER_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = options_server_string_table[ i ]; }
-	for ( i = 0; i < OPTIONS_SFTP_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = options_sftp_string_table[ i ]; }
-	for ( i = 0; i < CMESSAGEBOX_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = cmessagebox_string_table[ i ]; }
-	for ( i = 0; i < ADD_URLS_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = add_urls_string_table[ i ]; }
-	for ( i = 0; i < SEARCH_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = search_string_table[ i ]; }
-	for ( i = 0; i < SITE_MANAGER_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = site_manager_string_table[ i ]; }
-	for ( i = 0; i < ADD_CATEGORY_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = add_category_string_table[ i ]; }
-	for ( i = 0; i < FINGERPRINT_PROMPT_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = fingerprint_prompt_string_table[ i ]; }
-	for ( i = 0; i < UPDATE_CHECK_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = update_check_string_table[ i ]; }
-	for ( i = 0; i < COMMON_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = common_string_table[ i ]; }
-	for ( i = 0; i < COMMON_MESSAGE_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = common_message_string_table[ i ]; }
-	for ( i = 0; i < ABOUT_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = about_string_table[ i ]; }
-	for ( i = 0; i < DYNAMIC_MESSAGE_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = dynamic_message_string_table[ i ]; }
-	for ( i = 0; i < SFTP_KEX_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = sftp_kex_string_table[ i ]; }
-	for ( i = 0; i < SFTP_HK_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = sftp_hk_string_table[ i ]; }
-	for ( i = 0; i < SFTP_EC_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = sftp_ec_string_table[ i ]; }
-	for ( i = 0; i < SFTP_HKA_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = sftp_hka_string_table[ i ]; }
-	for ( i = 0; i < FILE_FILTERS_STRING_TABLE_SIZE; ++i ) { g_locale_table[ string_count++ ] = file_filters_string_table[ i ]; }
+	// NOTE: Do not write these as element-wise assignment loops. MSVC /O2 loop idiom
+	// recognition turns "copy a contiguous array of structs" loops into calls to the CRT
+	// memcpy symbol, which breaks the no-CRT link of the VS Release configuration.
+	// _memcpy_s is the project's own dependency-free implementation.
+	_memcpy_s( g_locale_table, sizeof( STRING_TABLE_DATA ) * MONTH_STRING_TABLE_SIZE, month_string_table, sizeof( month_string_table ) ); string_count += MONTH_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * DAY_STRING_TABLE_SIZE, day_string_table, sizeof( day_string_table ) ); string_count += DAY_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * DOWNLOAD_STRING_TABLE_SIZE, download_string_table, sizeof( download_string_table ) ); string_count += DOWNLOAD_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * MENU_STRING_TABLE_SIZE, menu_string_table, sizeof( menu_string_table ) ); string_count += MENU_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * OPTIONS_STRING_TABLE_SIZE, options_string_table, sizeof( options_string_table ) ); string_count += OPTIONS_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * OPTIONS_ADVANCED_STRING_TABLE_SIZE, options_advanced_string_table, sizeof( options_advanced_string_table ) ); string_count += OPTIONS_ADVANCED_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * OPTIONS_APPEARANCE_STRING_TABLE_SIZE, options_appearance_string_table, sizeof( options_appearance_string_table ) ); string_count += OPTIONS_APPEARANCE_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * OPTIONS_CONNECTION_STRING_TABLE_SIZE, options_connection_string_table, sizeof( options_connection_string_table ) ); string_count += OPTIONS_CONNECTION_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * OPTIONS_FTP_STRING_TABLE_SIZE, options_ftp_string_table, sizeof( options_ftp_string_table ) ); string_count += OPTIONS_FTP_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * OPTIONS_GENERAL_STRING_TABLE_SIZE, options_general_string_table, sizeof( options_general_string_table ) ); string_count += OPTIONS_GENERAL_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * OPTIONS_PROXY_STRING_TABLE_SIZE, options_proxy_string_table, sizeof( options_proxy_string_table ) ); string_count += OPTIONS_PROXY_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * OPTIONS_SERVER_STRING_TABLE_SIZE, options_server_string_table, sizeof( options_server_string_table ) ); string_count += OPTIONS_SERVER_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * OPTIONS_SFTP_STRING_TABLE_SIZE, options_sftp_string_table, sizeof( options_sftp_string_table ) ); string_count += OPTIONS_SFTP_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * CMESSAGEBOX_STRING_TABLE_SIZE, cmessagebox_string_table, sizeof( cmessagebox_string_table ) ); string_count += CMESSAGEBOX_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * ADD_URLS_STRING_TABLE_SIZE, add_urls_string_table, sizeof( add_urls_string_table ) ); string_count += ADD_URLS_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * SEARCH_STRING_TABLE_SIZE, search_string_table, sizeof( search_string_table ) ); string_count += SEARCH_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * SITE_MANAGER_STRING_TABLE_SIZE, site_manager_string_table, sizeof( site_manager_string_table ) ); string_count += SITE_MANAGER_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * ADD_CATEGORY_STRING_TABLE_SIZE, add_category_string_table, sizeof( add_category_string_table ) ); string_count += ADD_CATEGORY_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * FINGERPRINT_PROMPT_STRING_TABLE_SIZE, fingerprint_prompt_string_table, sizeof( fingerprint_prompt_string_table ) ); string_count += FINGERPRINT_PROMPT_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * UPDATE_CHECK_STRING_TABLE_SIZE, update_check_string_table, sizeof( update_check_string_table ) ); string_count += UPDATE_CHECK_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * COMMON_STRING_TABLE_SIZE, common_string_table, sizeof( common_string_table ) ); string_count += COMMON_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * COMMON_MESSAGE_STRING_TABLE_SIZE, common_message_string_table, sizeof( common_message_string_table ) ); string_count += COMMON_MESSAGE_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * ABOUT_STRING_TABLE_SIZE, about_string_table, sizeof( about_string_table ) ); string_count += ABOUT_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * DYNAMIC_MESSAGE_STRING_TABLE_SIZE, dynamic_message_string_table, sizeof( dynamic_message_string_table ) ); string_count += DYNAMIC_MESSAGE_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * SFTP_KEX_STRING_TABLE_SIZE, sftp_kex_string_table, sizeof( sftp_kex_string_table ) ); string_count += SFTP_KEX_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * SFTP_HK_STRING_TABLE_SIZE, sftp_hk_string_table, sizeof( sftp_hk_string_table ) ); string_count += SFTP_HK_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * SFTP_EC_STRING_TABLE_SIZE, sftp_ec_string_table, sizeof( sftp_ec_string_table ) ); string_count += SFTP_EC_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * SFTP_HKA_STRING_TABLE_SIZE, sftp_hka_string_table, sizeof( sftp_hka_string_table ) ); string_count += SFTP_HKA_STRING_TABLE_SIZE;
+	_memcpy_s( g_locale_table + string_count, sizeof( STRING_TABLE_DATA ) * FILE_FILTERS_STRING_TABLE_SIZE, file_filters_string_table, sizeof( file_filters_string_table ) ); string_count += FILE_FILTERS_STRING_TABLE_SIZE;
 
 	string_count = 0;
 
