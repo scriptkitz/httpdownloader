@@ -2509,8 +2509,14 @@ void ConstructRequest( SOCKET_CONTEXT *context, bool use_connect )
 
 	AdjustConstructBufferSize( context, request_length, context->request_info.host );
 
+	// An explicit per-download "no proxy" (PROXY_INFO_TYPE_DIRECT) overrides the global
+	// proxy list entirely.
+	bool task_proxy_bypassed = ( context->download_info != NULL &&
+								 context->download_info->proxy_info != NULL &&
+								 context->download_info->proxy_info->type == PROXY_INFO_TYPE_DIRECT );
+
 	// The active proxy from the proxy list (Options -> Proxy). 1 = global proxy, 2 = per-task proxy.
-	PROXY_ENTRY *active_proxy = GetActiveProxyForProtocol( context->request_info.protocol );
+	PROXY_ENTRY *active_proxy = ( task_proxy_bypassed ? NULL : GetActiveProxyForProtocol( context->request_info.protocol ) );
 	char use_http_proxy = ( active_proxy != NULL && active_proxy->type == PROXY_TYPE_HTTP ? 1 : 0 );
 	char use_https_proxy = ( active_proxy != NULL && active_proxy->type == PROXY_TYPE_HTTPS ? 1 : 0 );
 

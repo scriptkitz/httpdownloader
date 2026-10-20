@@ -194,6 +194,10 @@ enum IO_OPERATION
 	IO_SFTPCleanup
 };
 
+// PROXY_INFO::type values (per-download proxy). 0 = follow the global proxy list.
+// 5 = explicitly bypass all proxies for this download.
+#define PROXY_INFO_TYPE_DIRECT	5
+
 struct PROXY_INFO
 {
 	wchar_t				*hostname;

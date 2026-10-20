@@ -744,6 +744,9 @@ LRESULT CALLBACK ProxyEditWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 						RefreshProxyList();
 						RefreshProxyCombo();
 
+						// Adding or editing an entry changes the saved options.
+						_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
+
 						_SendMessageW( hWnd, WM_CLOSE, 0, 0 );
 					}
 				}
@@ -939,6 +942,8 @@ LRESULT CALLBACK ProxyTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 
 								RefreshProxyList();
 								RefreshProxyCombo();
+
+								_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
 							}
 						}
 					}
@@ -953,6 +958,9 @@ LRESULT CALLBACK ProxyTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 						ApplyProxySelection( selection );
 
 						RefreshProxyList();
+
+						// Choosing the active proxy is an option change: enable the Apply button.
+						_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
 					}
 				}
 				break;

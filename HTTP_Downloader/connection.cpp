@@ -2662,10 +2662,21 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								LeaveCriticalSection( &context->download_info->shared_info->di_cs );
 							}
 
-							PROXY_ENTRY *active_proxy = GetActiveProxyForProtocol( context->request_info.protocol );
+							PROXY_ENTRY *active_proxy = NULL;
+
+							// An explicit per-download "no proxy" overrides the global list too.
+							bool task_proxy_bypassed = ( context->download_info != NULL &&
+														 context->download_info->proxy_info != NULL &&
+														 context->download_info->proxy_info->type == PROXY_INFO_TYPE_DIRECT );
+
+							if ( !task_proxy_bypassed )
+							{
+								active_proxy = GetActiveProxyForProtocol( context->request_info.protocol );
+							}
 
 							if ( ( active_proxy != NULL && active_proxy->type == PROXY_TYPE_HTTPS ) ||
-							   ( context->download_info->proxy_info != NULL &&
+							   ( !task_proxy_bypassed &&
+								 context->download_info->proxy_info != NULL &&
 								 context->download_info->proxy_info->type == 2 ) )
 							{
 								use_https_proxy = true;
@@ -2674,7 +2685,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							if ( ( active_proxy != NULL &&
 								 ( active_proxy->type == PROXY_TYPE_SOCKS4 ||
 								   active_proxy->type == PROXY_TYPE_SOCKS5 ) ) ||
-							   ( context->download_info->proxy_info != NULL &&
+							   ( !task_proxy_bypassed &&
+								 context->download_info->proxy_info != NULL &&
 							   ( context->download_info->proxy_info->type == 3 ||
 								 context->download_info->proxy_info->type == 4 ) ) )
 							{
@@ -4701,7 +4713,13 @@ bool CreateConnection( SOCKET_CONTEXT *context, char *host, unsigned short port 
 
 	PROXY_INFO *pi = NULL;
 
-	if ( context->download_info != NULL &&
+	// Explicit "no proxy" for this download: it overrides the global proxy list as well.
+	bool proxy_bypassed = ( context->download_info != NULL &&
+							context->download_info->proxy_info != NULL &&
+							context->download_info->proxy_info->type == PROXY_INFO_TYPE_DIRECT );
+
+	if ( !proxy_bypassed &&
+		 context->download_info != NULL &&
 		 context->download_info->proxy_info != NULL &&
 		 context->download_info->proxy_info->type != 0 )
 	{
@@ -4724,7 +4742,7 @@ bool CreateConnection( SOCKET_CONTEXT *context, char *host, unsigned short port 
 			_enable_proxy_socks = false;
 		}
 	}
-	else
+	else if ( !proxy_bypassed )
 	{
 		// The active proxy from the proxy list (Options -> Proxy). Per-task proxy info (above)
 		// takes precedence.
@@ -4739,6 +4757,10 @@ bool CreateConnection( SOCKET_CONTEXT *context, char *host, unsigned short port 
 		{
 			_enable_proxy_socks = false;
 		}
+	}
+	else
+	{
+		_enable_proxy_socks = false;
 	}
 
 	if ( context->address_info == NULL )
@@ -4758,7 +4780,12 @@ bool CreateConnection( SOCKET_CONTEXT *context, char *host, unsigned short port 
 
 		unsigned char _address_type = 0;
 
-		if ( pi != NULL )
+		if ( proxy_bypassed )
+		{
+			// Explicit per-download "no proxy": connect straight to the target.
+			use_supplied_params = true;
+		}
+		else if ( pi != NULL )
 		{
 			_hostname = pi->hostname;
 			_punycode_hostname = pi->punycode_hostname;
