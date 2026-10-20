@@ -5,6 +5,7 @@
     <BuildType Name="Release" />
     <BuildType Name="Release Dark Mode" />
     <BuildType Name="Release Logging Support" />
+    <BuildType Name="Release-ASAN" />
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
