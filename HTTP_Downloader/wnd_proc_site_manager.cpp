@@ -471,6 +471,7 @@ wchar_t *GetSiteInfoString( SITE_INFO *si, int column, int item_index, wchar_t *
 				case 2: { buf = ST_V_HTTPS; } break;
 				case 3: { buf = ST_V_SOCKS_v4; } break;
 				case 4: { buf = ST_V_SOCKS_v5; } break;
+				case PROXY_INFO_TYPE_DIRECT: { buf = L"Direct"; } break;
 				default: { buf = L""; } break;
 			}
 		}
@@ -478,7 +479,7 @@ wchar_t *GetSiteInfoString( SITE_INFO *si, int column, int item_index, wchar_t *
 
 		case SM_COLUMN_PROXY_SERVER:
 		{
-			if ( si->proxy_info.type != 0 )
+			if ( si->proxy_info.type != 0 && si->proxy_info.type != PROXY_INFO_TYPE_DIRECT )
 			{
 				if ( si->proxy_info.address_type == 0 )
 				{
@@ -510,7 +511,7 @@ wchar_t *GetSiteInfoString( SITE_INFO *si, int column, int item_index, wchar_t *
 
 		case SM_COLUMN_PROXY_PORT:
 		{
-			if ( si->proxy_info.type != 0 )
+			if ( si->proxy_info.type != 0 && si->proxy_info.type != PROXY_INFO_TYPE_DIRECT )
 			{
 				buf = tbuf;	// Reset the buffer pointer.
 
@@ -571,6 +572,120 @@ wchar_t *GetSiteInfoString( SITE_INFO *si, int column, int item_index, wchar_t *
 	}
 
 	return buf;
+}
+
+// The site proxy combo is laid out as: [0] use the global proxy list, [1] no proxy (direct),
+// [2..] proxies defined in Options -> Proxy, then the four custom type entries.
+// Convert a combo index into the info type used by ShowHideSMProxyWindows():
+// 0 hides every parameter control, 1..4 show the controls for HTTP/HTTPS/SOCKS v4/v5.
+static int GetSMProxyInfoType( int combo_index )
+{
+	if ( combo_index <= 1 )
+	{
+		return 0;
+	}
+
+	int proxy_count = 0;
+	DoublyLinkedList *proxy_node = g_proxy_list;
+	while ( proxy_node != NULL )
+	{
+		if ( proxy_node->data != NULL ) { ++proxy_count; }
+		proxy_node = proxy_node->next;
+	}
+
+	if ( combo_index < 2 + proxy_count )
+	{
+		int pos = combo_index - 2;
+		proxy_node = g_proxy_list;
+		while ( proxy_node != NULL && pos > 0 ) { proxy_node = proxy_node->next; --pos; }
+
+		PROXY_ENTRY *proxy_entry = ( proxy_node != NULL ? ( PROXY_ENTRY * )proxy_node->data : NULL );
+
+		if ( proxy_entry != NULL )
+		{
+			return ( int )proxy_entry->type + 1;	// 0..3 -> 1..4
+		}
+
+		return 0;
+	}
+
+	return combo_index - ( 2 + proxy_count ) + 1;	// Custom types 1..4
+}
+
+// Convert the proxy info stored in a site back into the combo index. Matches a defined entry
+// (so its alias is displayed) by type, port and address; otherwise falls back to the custom
+// entry of the same type.
+static int GetSMProxyComboIndex( const PROXY_INFO *proxy_info )
+{
+	if ( proxy_info == NULL || proxy_info->type == 0 )
+	{
+		return 0;	// Follow the global proxy list.
+	}
+
+	if ( proxy_info->type == PROXY_INFO_TYPE_DIRECT )
+	{
+		return 1;	// No proxy (direct).
+	}
+
+	int proxy_count = 0;
+	int matched_index = -1;
+	int index = 2;
+
+	DoublyLinkedList *proxy_node = g_proxy_list;
+	while ( proxy_node != NULL )
+	{
+		PROXY_ENTRY *proxy_entry = ( PROXY_ENTRY * )proxy_node->data;
+
+		if ( proxy_entry != NULL )
+		{
+			++proxy_count;
+
+			if ( matched_index < 0 &&
+				 ( unsigned char )( proxy_entry->type + 1 ) == proxy_info->type &&
+				 proxy_entry->port == proxy_info->port &&
+				 proxy_entry->address_type == proxy_info->address_type )
+			{
+				bool match;
+
+				if ( proxy_info->address_type == 0 )
+				{
+					match = ( proxy_entry->hostname != NULL && proxy_info->hostname != NULL &&
+							  lstrcmpiW( proxy_entry->hostname, proxy_info->hostname ) == 0 );
+				}
+				else
+				{
+					match = ( proxy_entry->ip_address == proxy_info->ip_address );
+				}
+
+				if ( match )
+				{
+					matched_index = index;
+				}
+			}
+
+			++index;
+		}
+
+		proxy_node = proxy_node->next;
+	}
+
+	if ( matched_index >= 0 )
+	{
+		return matched_index;
+	}
+
+	int type_offset = ( int )proxy_info->type - 1;	// 1..4 -> 0..3
+
+	if ( type_offset < 0 )
+	{
+		type_offset = 0;
+	}
+	else if ( type_offset > 3 )
+	{
+		type_offset = 3;
+	}
+
+	return 2 + proxy_count + type_offset;
 }
 
 void ShowHideSMProxyWindows( int index )
@@ -1022,12 +1137,7 @@ void ShowHideSMTabs( int sw_type )
 
 				if ( sw_type == SW_SHOW )
 				{
-					index = ( int )_SendMessageW( g_hWnd_sm_proxy_type, CB_GETCURSEL, 0, 0 );
-
-					if ( index == CB_ERR )
-					{
-						index = 0;
-					}
+					index = GetSMProxyInfoType( ( int )_SendMessageW( g_hWnd_sm_proxy_type, CB_GETCURSEL, 0, 0 ) );
 				}
 				else
 				{
@@ -1373,7 +1483,7 @@ void SelectSiteItem( int index )
 
 		//
 
-		_SendMessageW( g_hWnd_sm_proxy_type, CB_SETCURSEL, si->proxy_info.type, 0 );
+		_SendMessageW( g_hWnd_sm_proxy_type, CB_SETCURSEL, GetSMProxyComboIndex( &si->proxy_info ), 0 );
 
 		if ( si->proxy_info.address_type == 0 )
 		{
@@ -1386,7 +1496,7 @@ void SelectSiteItem( int index )
 			_SendMessageW( g_hWnd_chk_sm_type_ip_address_socks, BM_SETCHECK, BST_CHECKED, 0 );
 		}
 
-		if ( si->proxy_info.type != 0 )
+		if ( si->proxy_info.type != 0 && si->proxy_info.type != PROXY_INFO_TYPE_DIRECT )
 		{
 			if ( si->proxy_info.address_type == 0 )
 			{
@@ -1440,7 +1550,7 @@ void SelectSiteItem( int index )
 
 		if ( _SendMessageW( g_hWnd_sm_tab, TCM_GETCURSEL, 0, 0 ) == 4 )
 		{
-			ShowHideSMProxyWindows( si->proxy_info.type );
+			ShowHideSMProxyWindows( ( si->proxy_info.type == PROXY_INFO_TYPE_DIRECT || si->proxy_info.type == 0 ? 0 : si->proxy_info.type ) );
 		}
 	}
 	else
@@ -1624,11 +1734,57 @@ LRESULT CALLBACK SiteManagerWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 			g_hWnd_static_sm_proxy_type = _CreateWindowW( WC_STATIC, ST_V_Use_proxy_, WS_CHILD, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
 			// Needs dimensions so that list displays in XP.
 			g_hWnd_sm_proxy_type = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_COMBOBOX, NULL, CBS_AUTOHSCROLL | CBS_DROPDOWNLIST | WS_CHILD | WS_TABSTOP | WS_VSCROLL | CBS_DARK_MODE, 0, 0, 100, 23, hWnd, ( HMENU )CB_SM_PROXY_TYPE, NULL, NULL );
-			_SendMessageW( g_hWnd_sm_proxy_type, CB_ADDSTRING, 0, ( LPARAM )ST_V_Default );
-			_SendMessageW( g_hWnd_sm_proxy_type, CB_ADDSTRING, 0, ( LPARAM )ST_V_HTTP );
-			_SendMessageW( g_hWnd_sm_proxy_type, CB_ADDSTRING, 0, ( LPARAM )ST_V_HTTPS );
-			_SendMessageW( g_hWnd_sm_proxy_type, CB_ADDSTRING, 0, ( LPARAM )ST_V_SOCKS_v4 );
-			_SendMessageW( g_hWnd_sm_proxy_type, CB_ADDSTRING, 0, ( LPARAM )ST_V_SOCKS_v5 );
+
+			// [0] follow the global proxy list, [1] explicitly bypass proxies, then every defined
+			// proxy from Options -> Proxy, then the custom type entries.
+			_SendMessageW( g_hWnd_sm_proxy_type, CB_ADDSTRING, 0, ( LPARAM )L"Use global proxy" );
+			_SendMessageW( g_hWnd_sm_proxy_type, CB_ADDSTRING, 0, ( LPARAM )L"No proxy (direct)" );
+
+			{
+				wchar_t combo_buf[ 512 ];
+
+				DoublyLinkedList *proxy_node = g_proxy_list;
+				while ( proxy_node != NULL )
+				{
+					PROXY_ENTRY *proxy_entry = ( PROXY_ENTRY * )proxy_node->data;
+
+					if ( proxy_entry != NULL )
+					{
+						if ( proxy_entry->alias != NULL && proxy_entry->alias[ 0 ] != 0 )
+						{
+							__snwprintf( combo_buf, 512, L"%s", proxy_entry->alias );
+						}
+						else
+						{
+							wchar_t addr_buf[ 256 ];
+							if ( proxy_entry->address_type == 1 )
+							{
+								unsigned char *ip = ( unsigned char * )&proxy_entry->ip_address;
+								__snwprintf( addr_buf, 256, L"%lu.%lu.%lu.%lu", ip[ 3 ], ip[ 2 ], ip[ 1 ], ip[ 0 ] );
+							}
+							else
+							{
+								__snwprintf( addr_buf, 256, L"%s", ( proxy_entry->hostname != NULL ? proxy_entry->hostname : L"" ) );
+							}
+
+							__snwprintf( combo_buf, 512, L"%s | %s:%hu",
+								( proxy_entry->type == PROXY_TYPE_HTTPS ? L"HTTPS" :
+								  proxy_entry->type == PROXY_TYPE_SOCKS4 ? L"SOCKS v4" :
+								  proxy_entry->type == PROXY_TYPE_SOCKS5 ? L"SOCKS v5" : L"HTTP" ),
+								addr_buf, proxy_entry->port );
+						}
+
+						_SendMessageW( g_hWnd_sm_proxy_type, CB_ADDSTRING, 0, ( LPARAM )combo_buf );
+					}
+
+					proxy_node = proxy_node->next;
+				}
+			}
+
+			_SendMessageW( g_hWnd_sm_proxy_type, CB_ADDSTRING, 0, ( LPARAM )L"Custom: HTTP" );
+			_SendMessageW( g_hWnd_sm_proxy_type, CB_ADDSTRING, 0, ( LPARAM )L"Custom: HTTPS" );
+			_SendMessageW( g_hWnd_sm_proxy_type, CB_ADDSTRING, 0, ( LPARAM )L"Custom: SOCKS v4" );
+			_SendMessageW( g_hWnd_sm_proxy_type, CB_ADDSTRING, 0, ( LPARAM )L"Custom: SOCKS v5" );
 
 			_SendMessageW( g_hWnd_sm_proxy_type, CB_SETCURSEL, 0, 0 );
 
@@ -2185,15 +2341,91 @@ LRESULT CALLBACK SiteManagerWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 
 						if ( index != CB_ERR )
 						{
-							_SendMessageW( g_hWnd_sm_hostname_socks, WM_SETTEXT, 0, ( LPARAM )L"localhost" );
-							_SendMessageW( g_hWnd_sm_ip_address_socks, IPM_SETADDRESS, 0, 2130706433 );	// 127.0.0.1
+							// Count the defined proxies first: [0] global, [1] direct,
+							// [2..] defined entries, then custom type entries.
+							unsigned char proxy_count = 0;
+							DoublyLinkedList *proxy_node = g_proxy_list;
+							while ( proxy_node != NULL )
+							{
+								if ( proxy_node->data != NULL ) { ++proxy_count; }
+								proxy_node = proxy_node->next;
+							}
 
-							char value[ 6 ];
-							_memzero( value, sizeof( char ) * 6 );
-							__snprintf( value, 6, "%hu", ( index == 1 ? 80 : ( index == 2 ? 443 : 1080 ) ) );
-							_SendMessageA( g_hWnd_sm_port_socks, WM_SETTEXT, 0, ( LPARAM )value );
+							const int custom_start = 2 + proxy_count;
 
-							ShowHideSMProxyWindows( index );
+							if ( index <= 1 )
+							{
+								// Use global proxy / direct: hide every parameter control.
+								ShowHideSMProxyWindows( 0 );
+							}
+							else if ( index < custom_start )
+							{
+								// Defined proxy: copy its parameters into the controls so that
+								// they can still be tweaked for this site only.
+								PROXY_ENTRY *proxy_entry = NULL;
+								int pos = index - 2;
+								proxy_node = g_proxy_list;
+								while ( proxy_node != NULL && pos > 0 ) { proxy_node = proxy_node->next; --pos; }
+
+								if ( proxy_node != NULL )
+								{
+									proxy_entry = ( PROXY_ENTRY * )proxy_node->data;
+								}
+
+								if ( proxy_entry != NULL )
+								{
+									unsigned char info_type = ( unsigned char )( proxy_entry->type + 1 );	// 0..3 -> 1..4
+
+									_SendMessageW( g_hWnd_chk_sm_type_hostname_socks, BM_SETCHECK, ( proxy_entry->address_type == 0 ? BST_CHECKED : BST_UNCHECKED ), 0 );
+									_SendMessageW( g_hWnd_chk_sm_type_ip_address_socks, BM_SETCHECK, ( proxy_entry->address_type == 1 ? BST_CHECKED : BST_UNCHECKED ), 0 );
+
+									_SendMessageW( g_hWnd_sm_hostname_socks, WM_SETTEXT, 0, ( LPARAM )( proxy_entry->hostname != NULL ? proxy_entry->hostname : L"" ) );
+									_SendMessageW( g_hWnd_sm_ip_address_socks, IPM_SETADDRESS, 0, proxy_entry->ip_address );
+
+									char port_value[ 6 ];
+									_memzero( port_value, sizeof( char ) * 6 );
+									__snprintf( port_value, 6, "%hu", proxy_entry->port );
+									_SendMessageA( g_hWnd_sm_port_socks, WM_SETTEXT, 0, ( LPARAM )port_value );
+
+									if ( info_type == 1 || info_type == 2 )
+									{
+										_SendMessageW( g_hWnd_edit_sm_proxy_auth_username, WM_SETTEXT, 0, ( LPARAM )( proxy_entry->username != NULL ? proxy_entry->username : L"" ) );
+										_SendMessageW( g_hWnd_edit_sm_proxy_auth_password, WM_SETTEXT, 0, ( LPARAM )( proxy_entry->password != NULL ? proxy_entry->password : L"" ) );
+									}
+									else if ( info_type == 3 )
+									{
+										_SendMessageW( g_hWnd_sm_auth_ident_username_socks, WM_SETTEXT, 0, ( LPARAM )( proxy_entry->ident_username != NULL ? proxy_entry->ident_username : L"" ) );
+										_SendMessageW( g_hWnd_chk_sm_resolve_domain_names_v4a, BM_SETCHECK, ( proxy_entry->resolve_domain_names ? BST_CHECKED : BST_UNCHECKED ), 0 );
+									}
+									else if ( info_type == 4 )
+									{
+										_SendMessageW( g_hWnd_chk_sm_use_authentication_socks, BM_SETCHECK, ( proxy_entry->use_authentication ? BST_CHECKED : BST_UNCHECKED ), 0 );
+										_SendMessageW( g_hWnd_sm_auth_username_socks, WM_SETTEXT, 0, ( LPARAM )( proxy_entry->username != NULL ? proxy_entry->username : L"" ) );
+										_SendMessageW( g_hWnd_sm_auth_password_socks, WM_SETTEXT, 0, ( LPARAM )( proxy_entry->password != NULL ? proxy_entry->password : L"" ) );
+										_SendMessageW( g_hWnd_chk_sm_resolve_domain_names, BM_SETCHECK, ( proxy_entry->resolve_domain_names ? BST_CHECKED : BST_UNCHECKED ), 0 );
+									}
+
+									ShowHideSMProxyWindows( info_type );
+								}
+							}
+							else
+							{
+								// Custom entry: start from defaults.
+								unsigned char info_type = ( unsigned char )( index - custom_start + 1 );
+
+								_SendMessageW( g_hWnd_chk_sm_type_hostname_socks, BM_SETCHECK, BST_CHECKED, 0 );
+								_SendMessageW( g_hWnd_chk_sm_type_ip_address_socks, BM_SETCHECK, BST_UNCHECKED, 0 );
+
+								_SendMessageW( g_hWnd_sm_hostname_socks, WM_SETTEXT, 0, ( LPARAM )L"localhost" );
+								_SendMessageW( g_hWnd_sm_ip_address_socks, IPM_SETADDRESS, 0, 2130706433 );	// 127.0.0.1
+
+								char value[ 6 ];
+								_memzero( value, sizeof( char ) * 6 );
+								__snprintf( value, 6, "%hu", ( info_type == 1 ? 80 : ( info_type == 2 ? 443 : 1080 ) ) );
+								_SendMessageA( g_hWnd_sm_port_socks, WM_SETTEXT, 0, ( LPARAM )value );
+
+								ShowHideSMProxyWindows( info_type );
+							}
 						}
 					}
 				}
@@ -2486,10 +2718,56 @@ LRESULT CALLBACK SiteManagerWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 
 								// PROXY
 
+								// Map the combo selection to the site proxy type:
+								// [0] follow global, [1] direct, [2..] defined entries, then custom types.
+								{
+									int proxy_sel = ( int )_SendMessageW( g_hWnd_sm_proxy_type, CB_GETCURSEL, 0, 0 );
 
-								si->proxy_info.type = ( unsigned char )_SendMessageW( g_hWnd_sm_proxy_type, CB_GETCURSEL, 0, 0 );
+									unsigned char proxy_count = 0;
+									DoublyLinkedList *proxy_node = g_proxy_list;
+									while ( proxy_node != NULL )
+									{
+										if ( proxy_node->data != NULL ) { ++proxy_count; }
+										proxy_node = proxy_node->next;
+									}
 
-								if ( si->proxy_info.type != 0 )
+									unsigned char proxy_type = 0;
+
+									if ( proxy_sel == 1 )
+									{
+										proxy_type = PROXY_INFO_TYPE_DIRECT;
+									}
+									else if ( proxy_sel >= 2 && proxy_sel < 2 + proxy_count )
+									{
+										int pos = proxy_sel - 2;
+										proxy_node = g_proxy_list;
+										while ( proxy_node != NULL && pos > 0 ) { proxy_node = proxy_node->next; --pos; }
+
+										PROXY_ENTRY *proxy_entry = ( proxy_node != NULL ? ( PROXY_ENTRY * )proxy_node->data : NULL );
+										if ( proxy_entry != NULL )
+										{
+											proxy_type = ( unsigned char )( proxy_entry->type + 1 );	// 0..3 -> 1..4
+										}
+									}
+									else if ( proxy_sel >= 2 + proxy_count )
+									{
+										proxy_type = ( unsigned char )( proxy_sel - ( 2 + proxy_count ) + 1 );	// Custom types 1..4
+									}
+
+									si->proxy_info.type = proxy_type;
+
+									if ( proxy_type == PROXY_INFO_TYPE_DIRECT )
+									{
+										// A direct connection needs no parameters, but the site settings
+										// format always stores an address and a port. Keep them neutral so
+										// that saving never dereferences a NULL hostname.
+										si->proxy_info.address_type = 1;
+										si->proxy_info.ip_address = 0;
+										si->proxy_info.port = 0;
+									}
+								}
+
+								if ( si->proxy_info.type != 0 && si->proxy_info.type != PROXY_INFO_TYPE_DIRECT )
 								{
 									unsigned int hostname_length;
 
@@ -3386,7 +3664,7 @@ LRESULT CALLBACK SiteManagerWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 			//
 
 			_DeferWindowPos( hdwp, g_hWnd_static_sm_proxy_type, HWND_TOP, _SCALE_SM_( 20 ), tab_child_y_offset + _SCALE_SM_( 10 ), _SCALE_SM_( 150 ), _SCALE_SM_( 17 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_sm_proxy_type, HWND_TOP, _SCALE_SM_( 20 ), tab_child_y_offset + _SCALE_SM_( 28 ), _SCALE_SM_( 100 ), _SCALE_SM_( 23 ), SWP_NOZORDER );
+			_DeferWindowPos( hdwp, g_hWnd_sm_proxy_type, HWND_TOP, _SCALE_SM_( 20 ), tab_child_y_offset + _SCALE_SM_( 28 ), rc.right - _SCALE_SM_( 40 ), _SCALE_SM_( 23 ), SWP_NOZORDER );
 
 			_DeferWindowPos( hdwp, g_hWnd_static_sm_hoz1, HWND_TOP, _SCALE_SM_( 20 ), tab_child_y_offset + _SCALE_SM_( 61 ), rc.right - _SCALE_SM_( 40 ), _SCALE_SM_( 1 ), SWP_NOZORDER );
 

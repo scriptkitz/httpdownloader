@@ -7825,12 +7825,12 @@ DWORD WINAPI AddURL( void *add_info )
 					proxy_info.password = si->proxy_info.password;
 					proxy_info.resolve_domain_names = si->proxy_info.resolve_domain_names;
 
-					proxy_hostname_length = lstrlenW( si->proxy_info.hostname );
-					proxy_punycode_hostname_length = lstrlenW( si->proxy_info.punycode_hostname );
-					proxy_w_username_length = lstrlenW( si->proxy_info.w_username );
-					proxy_w_password_length = lstrlenW( si->proxy_info.w_password );
-					proxy_username_length = lstrlenA( si->proxy_info.username );
-					proxy_password_length = lstrlenA( si->proxy_info.password );
+					proxy_hostname_length = ( si->proxy_info.hostname != NULL ? lstrlenW( si->proxy_info.hostname ) : 0 );
+					proxy_punycode_hostname_length = ( si->proxy_info.punycode_hostname != NULL ? lstrlenW( si->proxy_info.punycode_hostname ) : 0 );
+					proxy_w_username_length = ( si->proxy_info.w_username != NULL ? lstrlenW( si->proxy_info.w_username ) : 0 );
+					proxy_w_password_length = ( si->proxy_info.w_password != NULL ? lstrlenW( si->proxy_info.w_password ) : 0 );
+					proxy_username_length = ( si->proxy_info.username != NULL ? lstrlenA( si->proxy_info.username ) : 0 );
+					proxy_password_length = ( si->proxy_info.password != NULL ? lstrlenA( si->proxy_info.password ) : 0 );
 				}
 				else
 				{
