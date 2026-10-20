@@ -255,6 +255,74 @@ LONG IncrementStatusCount( unsigned int status )
 	}
 }
 
+void RecalculateDownloaded( DOWNLOAD_INFO *di )
+{
+	if ( di == NULL || di->range_list == NULL || di->file_size == 0 )
+	{
+		return;
+	}
+
+	// Sum what is still missing instead of what has been written. On a retry the code does
+	//   range_start += content_offset;  content_offset = 0;
+	// so already-downloaded bytes are absorbed into range_start and are no longer visible as
+	// a content_offset. Summing offsets would therefore undercount (progress could even be
+	// reported as e.g. 76% on a completed download). The remaining amount of every range is
+	// always accurate, so: downloaded = file_size - remaining.
+	unsigned long long remaining = 0;
+
+	DoublyLinkedList *range_node = di->range_list;
+	while ( range_node != NULL && range_node != di->range_list_end )
+	{
+		RANGE_INFO *ri = ( RANGE_INFO * )range_node->data;
+		if ( ri != NULL && ri->range_end >= ri->range_start )
+		{
+			unsigned long long range_length = ( ri->range_end - ri->range_start ) + 1;
+			unsigned long long range_done = ( ri->content_offset <= range_length ? ri->content_offset : range_length );
+
+			remaining += ( range_length - range_done );
+		}
+
+		range_node = range_node->next;
+	}
+
+	if ( remaining > di->file_size )
+	{
+		// Ranges don't add up to the expected size (server responded with a different length).
+		// Keep the existing counter rather than reporting a negative value.
+		return;
+	}
+
+	unsigned long long downloaded = di->file_size - remaining;
+
+	di->downloaded = downloaded;
+
+	// Keep the speed sampler from reporting a bogus spike after the correction.
+	di->last_downloaded = downloaded;
+}
+
+unsigned short CountActiveParts( DOWNLOAD_INFO *di )
+{
+	if ( di == NULL )
+	{
+		return 0;
+	}
+
+	unsigned short count = 0;
+
+	DoublyLinkedList *parts_node = di->parts_list;
+	while ( parts_node != NULL )
+	{
+		if ( parts_node->data != NULL )
+		{
+			++count;
+		}
+
+		parts_node = parts_node->next;
+	}
+
+	return count;
+}
+
 void SetStatus( DOWNLOAD_INFO *di, unsigned int status )
 {
 	if ( di != NULL )
@@ -626,6 +694,94 @@ DWORD WINAPI Timeout( LPVOID /*WorkThreadContext*/ )
 							}
 						}
 					}
+
+				LeaveCriticalSection( &context->context_cs );
+			}
+
+			// Stuck-context diagnostic (logger build only).
+			//
+			// A context that is downloading, has no IO in flight, and is not paused will never
+			// make progress on its own. This is the state a download can end up in after a
+			// pause/resume cycle when a part failed to be re-posted. Report it so the
+			// [STALL-DBG] line can be matched against a resume ([RESUME-DBG]) in the log.
+#ifdef ENABLE_LOGGING
+			if ( TryEnterCriticalSection( &context->context_cs ) == TRUE )
+			{
+				if ( context->cleanup == 0 &&
+					 context->status == STATUS_DOWNLOADING &&
+					 context->pending_operations == 0 &&
+					 !context->is_paused &&
+					 context->socket != INVALID_SOCKET &&
+					 context->download_info != NULL &&
+					 context->download_info->downloaded < context->download_info->file_size )
+				{
+					++context->stall_ticks;
+
+					// Log on the 5th tick, then every 15 ticks to keep the log readable.
+					if ( context->stall_ticks == 5 || ( context->stall_ticks > 5 && ( ( context->stall_ticks - 5 ) % 15 ) == 0 ) )
+					{
+						RANGE_INFO *stall_ri = context->header_info.range_info;
+
+						WriteLog( LOG_WARNING,
+							"[STALL-DBG] ctx=%p part=%u op=%d ticks=%u downloaded=%llu/%llu active_parts=%u parts=%u range=%llu-%llu offset=%llu di=%p",
+							(void *)context,
+							(unsigned int)context->part,
+							(int)context->overlapped.current_operation,
+							context->stall_ticks,
+							context->download_info->downloaded,
+							context->download_info->file_size,
+							(unsigned int)context->download_info->active_parts,
+							(unsigned int)context->download_info->parts,
+							(stall_ri != NULL ? stall_ri->range_start : 0ULL),
+							(stall_ri != NULL ? stall_ri->range_end : 0ULL),
+							(stall_ri != NULL ? stall_ri->content_offset : 0ULL),
+							(void *)context->download_info );
+					}
+				}
+				else
+				{
+					context->stall_ticks = 0;
+				}
+
+				LeaveCriticalSection( &context->context_cs );
+			}
+#endif
+
+			// Drive a stuck cleanup.
+			//
+			// CleanupConnection() is only entered from an IO completion. A context that was marked
+			// for cleanup (cleanup != 0) while it had no IO in flight is therefore never freed: it
+			// stays in parts_list forever, active_parts never drops and the download can neither
+			// complete nor be restarted (the start path waits for active_parts == 0). This is what
+			// repeated pause/stop/start cycles trigger. Re-post a close to get it cleaned up.
+			if ( TryEnterCriticalSection( &context->context_cs ) == TRUE )
+			{
+				if ( context->cleanup != 0 && context->pending_operations == 0 )
+				{
+					++context->cleanup_ticks;
+
+					if ( context->cleanup_ticks >= 2 )
+					{
+						context->cleanup_ticks = 0;
+
+						InterlockedIncrement( &context->pending_operations );
+						context->overlapped_close.current_operation = ( context->_ssl_s != NULL || context->_ssl_o != NULL ? IO_Shutdown : IO_Close );
+						PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped_close );
+
+#ifdef ENABLE_LOGGING
+						WriteLog( LOG_WARNING,
+							"[CLEANUP-DBG] re-posted close for stuck context ctx=%p status=%08x cleanup=%d op=%d",
+							(void *)context,
+							context->status,
+							(int)context->cleanup,
+							(int)context->overlapped_close.current_operation );
+#endif
+					}
+				}
+				else
+				{
+					context->cleanup_ticks = 0;
+				}
 
 				LeaveCriticalSection( &context->context_cs );
 			}
@@ -5307,6 +5463,13 @@ void ResetDownload( DOWNLOAD_INFO *di, unsigned char reset_type, bool reset_prog
 	}
 }
 
+// NOTE: the name is historical and misleading. This only "restarts" when restart_type asks for a
+// reset; it is also the normal start/resume entry point.
+//   START_TYPE_NONE            -> keep the range list and every content_offset: continue from the
+//                                 breakpoint (this is what Start does after Pause or Stop).
+//   START_TYPE_HOST            -> ResetDownload() frees the ranges, zeroes downloaded and file_size:
+//                                 download again from byte 0 (this is Restart).
+//   START_TYPE_HOST_IN_GROUP   -> same reset, restricted to one host of a multi-URL group.
 void RestartDownload( DOWNLOAD_INFO *di, unsigned char restart_type, unsigned char start_operation )
 {
 	if ( di != NULL )
@@ -9834,11 +9997,28 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 								{
 									incomplete_download = false;
 
-									SetStatus( di, context->status & ~STATUS_DELETE );
+									// Never propagate an empty status: STATUS_NONE (0) is displayed as
+									// "unknown" and leaves the item in a state where Start does nothing.
+									// This can happen when a context was paused with no state flags left
+									// (e.g. it was resumed with tmp_status == 0) and then closed.
+									unsigned int remaining_status = ( context->status & ~STATUS_DELETE );
+
+									SetStatus( di, ( remaining_status != 0 ? remaining_status : STATUS_STOPPED ) );
 								}
 							}
 							else if ( di->status != STATUS_FILE_IO_ERROR && di->status != STATUS_INSUFFICIENT_DISK_SPACE )
 							{
+								// Everything has been downloaded. Re-derive the counter from the
+								// ranges and finish at exactly 100% so the item never keeps a stale
+								// percentage (e.g. 76%) after completing.
+								RecalculateDownloaded( di );
+
+								if ( di->file_size != 0 && di->downloaded < di->file_size )
+								{
+									di->downloaded = di->file_size;
+									di->last_downloaded = di->file_size;
+								}
+
 								SetStatus( di, STATUS_COMPLETED );
 							}
 

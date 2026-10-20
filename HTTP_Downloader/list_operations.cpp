@@ -1636,7 +1636,69 @@ THREAD_RETURN handle_connection( void *pArguments )
 									 STATUS_PAUSED |
 									 STATUS_QUEUED ) )	// The download is currently paused, or queued.
 						{
-							if ( status == STATUS_DOWNLOADING ||
+							// Stop while paused or queued. Without this the request fell through and did
+							// nothing at all: the item stayed "Downloading, Paused" with its contexts
+							// still holding (or waiting on) socket operations, and the next Start tried
+							// to resume those orphaned contexts in place -> no data, no speed, no
+							// progress. Releasing the contexts here lets the following Start rebuild
+							// them from the saved range offsets.
+							if ( status == STATUS_STOPPED )
+							{
+								SetStatus( di, STATUS_STOPPED );
+
+								if ( is_group && tln == tln_last_host )
+								{
+									EnterCriticalSection( &di->shared_info->di_cs );
+									SetStatus( di->shared_info, STATUS_STOPPED );
+									LeaveCriticalSection( &di->shared_info->di_cs );
+								}
+
+								bool was_active = ( di->download_node.data != NULL );
+								bool was_queued = ( di->queue_node.data != NULL );
+
+								LeaveCriticalSection( &di->di_cs );
+
+								if ( was_queued )
+								{
+									EnterCriticalSection( &download_queue_cs );
+
+									if ( di->queue_node.data != NULL )
+									{
+										DLL_RemoveNode( &download_queue, &di->queue_node );
+										di->queue_node.data = NULL;
+									}
+
+									LeaveCriticalSection( &download_queue_cs );
+								}
+
+								if ( was_active )
+								{
+									// di->status is set to STATUS_STOPPED again in CleanupConnection().
+									while ( context_node != NULL )
+									{
+										context = ( SOCKET_CONTEXT * )context_node->data;
+
+										context_node = context_node->next;
+
+#ifdef ENABLE_LOGGING
+										if ( context != NULL )
+										{
+											WriteLog( LOG_INFO_CON_STATE,
+												"[STOP-DBG] ctx=%p status=%08x is_paused=%d pending=%ld cleanup=%d op=%d",
+												(void *)context,
+												context->status,
+												( context->is_paused ? 1 : 0 ),
+												(long)context->pending_operations,
+												(int)context->cleanup,
+												(int)context->overlapped.current_operation );
+										}
+#endif
+
+										SetContextStatus( context, STATUS_STOPPED );
+									}
+								}
+							}
+							else if ( status == STATUS_DOWNLOADING ||
 								 status == STATUS_RESTART )	// Resume downloading or restart download.
 							{
 								// Download is active, continue where we left off.
@@ -1657,11 +1719,50 @@ THREAD_RETURN handle_connection( void *pArguments )
 									else
 									{
 										SetStatus( di, di->status & ~STATUS_PAUSED );
+
+										// A download that was paused without any other state flag would
+										// end up with STATUS_NONE. Resuming it must leave it downloading,
+										// otherwise every context inherits an empty status below, the
+										// cleanup path stores that empty status and the item becomes
+										// "unknown" (Start then does nothing).
+										if ( di->status == STATUS_NONE )
+										{
+											SetStatus( di, STATUS_DOWNLOADING );
+										}
 									}
 
 									tmp_status = di->status;
 
+									// Repair the byte counter before continuing. Every reconnect/retry
+									// re-adds the bytes it writes, so repeated pause/resume cycles could
+									// drift the counter past the file size (progress > 100%) and keep the
+									// download from ever being considered complete.
+									RecalculateDownloaded( di );
+
+									// Resync the context count with the parts list. A stop/start cycle can
+									// race with the asynchronous cleanup and leave active_parts above the
+									// real number of contexts (e.g. 20 for a 10 part download), which both
+									// over-subscribes the server and blocks the completion check.
+									di->active_parts = CountActiveParts( di );
+
+#ifdef ENABLE_LOGGING
+									unsigned short counted_parts = CountActiveParts( di );
+#endif
+
 									LeaveCriticalSection( &di->di_cs );
+
+#ifdef ENABLE_LOGGING
+									WriteLog( LOG_INFO_CON_STATE,
+										"[RESUME-DBG] di=%p status=%08x downloaded=%llu/%llu active_parts=%u(counted %u) parts=%u parts_list=%s",
+										(void *)di,
+										tmp_status,
+										di->downloaded,
+										di->file_size,
+										(unsigned int)di->active_parts,
+										(unsigned int)counted_parts,
+										(unsigned int)di->parts,
+										( di->parts_list != NULL ? "yes" : "empty" ) );
+#endif
 
 									// Run through our parts list and connect to each context.
 									while ( context_node != NULL )
@@ -1673,6 +1774,23 @@ THREAD_RETURN handle_connection( void *pArguments )
 										if ( context != NULL )
 										{
 											EnterCriticalSection( &context->context_cs );
+
+#ifdef ENABLE_LOGGING
+											{
+												RANGE_INFO *resume_ri = context->header_info.range_info;
+
+												WriteLog( LOG_INFO_CON_STATE,
+													"[RESUME-DBG] part=%u ctx=%p op=%d was_paused=%d pending=%ld range=%llu-%llu offset=%llu",
+													(unsigned int)context->part,
+													(void *)context,
+													(int)context->overlapped.current_operation,
+													( context->is_paused ? 1 : 0 ),
+													(long)context->pending_operations,
+													( resume_ri != NULL ? resume_ri->range_start : 0ULL ),
+													( resume_ri != NULL ? resume_ri->range_end : 0ULL ),
+													( resume_ri != NULL ? resume_ri->content_offset : 0ULL ) );
+											}
+#endif
 
 											context->status = tmp_status;
 
@@ -1989,6 +2107,21 @@ THREAD_RETURN handle_connection( void *pArguments )
 							else if ( IS_STATUS_NOT( status, STATUS_PAUSED | STATUS_STOPPED ) )
 							{
 								// Ensure that the download is actually stopped and that there are no active parts downloading.
+								// active_parts is maintained by ++/-- across asynchronous cleanups, so resync it with the
+								// parts list first: a stale (too high) value would otherwise block every later start.
+								di->active_parts = CountActiveParts( di );
+
+#ifdef ENABLE_LOGGING
+								if ( di->active_parts != 0 )
+								{
+									WriteLog( LOG_INFO_CON_STATE,
+										"[START-DBG] start skipped: active_parts=%u parts=%u status=%08x",
+										(unsigned int)di->active_parts,
+										(unsigned int)di->parts,
+										di->status );
+								}
+#endif
+
 								if ( di->active_parts == 0 )
 								{
 									g_download_history_changed = true;

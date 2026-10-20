@@ -502,6 +502,70 @@ DWORD WINAPI UpdateWindow( LPVOID /*WorkThreadContext*/ )
 								}
 							}
 
+#ifdef ENABLE_LOGGING
+							// Periodic progress trace (logger build only). Used to verify that the
+							// reported percentage never exceeds 100% and that active_parts never
+							// drifts above the configured part count during pause/stop/start cycles.
+							if ( di->progress_log_tick == 0 ||
+								 ( current_time.ull - di->progress_log_tick ) >= ( 5 * FILETIME_TICKS_PER_SECOND ) )
+							{
+								di->progress_log_tick = current_time.ull;
+
+								unsigned long long progress = 0;
+								if ( di->file_size != 0 )
+								{
+									progress = ( di->downloaded <= di->file_size ? ( di->downloaded * 1000 ) / di->file_size : 1000 );
+								}
+
+								WriteLog( LOG_INFO_CON_STATE,
+									"[PROGRESS-DBG] status=%08x downloaded=%llu/%llu (%llu.%llu%%) active_parts=%u(counted %u) parts=%u",
+									di->status,
+									di->downloaded,
+									di->file_size,
+									progress / 10,
+									progress % 10,
+									(unsigned int)di->active_parts,
+									(unsigned int)CountActiveParts( di ),
+									(unsigned int)di->parts );
+							}
+
+							// Download-level stall diagnostic (logger build only).
+							//
+							// A downloading item whose downloaded counter has not moved for several
+							// seconds has no part making progress. This is what a download looks like
+							// after a pause/resume when a part was never re-posted: the status stays
+							// "Downloading", the speed column stays at 0 and the file never finishes.
+							if ( di->status == STATUS_DOWNLOADING &&
+								 di->file_size != 0 &&
+								 di->downloaded < di->file_size )
+							{
+								if ( di->downloaded != di->stall_last_downloaded || di->stall_last_progress == 0 )
+								{
+									di->stall_last_downloaded = di->downloaded;
+									di->stall_last_progress = current_time.ull;
+								}
+								else if ( ( current_time.ull - di->stall_last_progress ) >= ( 5 * FILETIME_TICKS_PER_SECOND ) )
+								{
+									di->stall_last_progress = current_time.ull;	// Report again 5s later.
+
+									WriteLog( LOG_WARNING,
+										"[STALL-DBG] downloading with no progress: status=%08x downloaded=%llu/%llu active_parts=%u parts=%u hosts=%u di=%p",
+										di->status,
+										di->downloaded,
+										di->file_size,
+										(unsigned int)di->active_parts,
+										(unsigned int)di->parts,
+										(unsigned int)di->hosts,
+										(void *)di );
+								}
+							}
+							else
+							{
+								di->stall_last_downloaded = di->downloaded;
+								di->stall_last_progress = current_time.ull;
+							}
+#endif
+
 							LeaveCriticalSection( &di->di_cs );
 						}
 					}

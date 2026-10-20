@@ -6390,11 +6390,19 @@ LRESULT CALLBACK TreeListViewWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM
 						if ( di != NULL )
 						{
 							// Double-click behavior by status:
-							// completed -> open the file; downloading/connecting -> pause;
-							// other states keep the original behavior (Update Download dialog).
+							// completed -> open the file; paused -> resume; downloading/connecting ->
+							// pause; other states keep the original behavior (Update Download dialog).
+							//
+							// The paused check MUST come before the downloading one: pausing keeps the
+							// previous status bits, so a paused download is "Downloading, Paused" and
+							// would otherwise match the downloading branch again (pause -> no-op).
 							if ( IS_STATUS( di->status, STATUS_COMPLETED ) )
 							{
 								HandleCommand( hWnd, MENU_OPEN_FILE );
+							}
+							else if ( IS_STATUS( di->status, STATUS_PAUSED ) )
+							{
+								HandleCommand( hWnd, MENU_START );
 							}
 							else if ( IS_STATUS( di->status, STATUS_DOWNLOADING | STATUS_CONNECTING ) )
 							{

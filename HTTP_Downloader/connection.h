@@ -407,6 +407,16 @@ struct SOCKET_CONTEXT
 	bool				processed_header;
 
 	bool				is_paused;			// The last IO has completed while status is in the paused state.
+
+	unsigned int		stall_ticks;		// Consecutive 1s timeout-thread ticks where a downloading
+											// context had no IO in flight and was not paused. Used only
+											// for the [STALL-DBG] diagnostic below.
+
+	unsigned int		cleanup_ticks;		// Consecutive 1s ticks where the context was marked for
+											// cleanup but had no IO in flight. CleanupConnection only
+											// runs from an IO completion, so such a context would leak
+											// (never freed, active_parts never drops). The timeout
+											// thread re-posts a close to drive it.
 };
 
 struct ADD_INFO
@@ -511,6 +521,13 @@ struct DOWNLOAD_INFO
 	unsigned long long	throttle_log_phase_tick;	// GetTickCount64() of the last wait/active phase log (rate-limits phase logging to ~1/s).
 	int					throttle_log_phase;		// Last logged phase: 0=unknown, 1=active(xfer), 2=waiting(window exhausted).
 	unsigned int		throttle_log_phases_seen;	// Bit0=ACTIVE seen, Bit1=WAIT seen. Guarantees the first occurrence of each phase is logged even if it flips rapidly.
+
+	// --- [STALL-DBG] stuck-download detection (logger mode only). The stats timer compares the
+	//     downloaded counter against these; a downloading item whose byte count has not moved for
+	//     several seconds has no part making progress. ---
+	unsigned long long	stall_last_downloaded;	// Last downloaded value observed by the stats timer.
+	unsigned long long	stall_last_progress;	// FILETIME of the last observed change (0 = not initialized yet).
+	unsigned long long	progress_log_tick;		// FILETIME of the last [PROGRESS-DBG] line (0 = not yet).
 };
 
 DWORD WINAPI IOCPDownloader( LPVOID pArgs );
@@ -565,6 +582,18 @@ LONG DecrementStatusCount( unsigned int status );
 LONG IncrementStatusCount( unsigned int status );
 void SetStatus( DOWNLOAD_INFO *di, unsigned int status );
 void SetSharedInfoStatus( DOWNLOAD_INFO *shared_info );
+
+// Recomputes DOWNLOAD_INFO::downloaded from the per-range content offsets. The counter is
+// incremented per file write, so a range that is retried/re-downloaded (connection resets,
+// pause + resume cycles) can be counted twice and push the progress above 100%, which in
+// turn breaks the completion detection. The range list is the authoritative record.
+void RecalculateDownloaded( DOWNLOAD_INFO *di );
+
+// Counts the contexts currently in DOWNLOAD_INFO::parts_list. active_parts is maintained with
+// ++ on context creation and -- in CleanupConnection, so a stop/start cycle that races with the
+// asynchronous cleanup can leave it higher than the number of real contexts (e.g. 20 for a 10
+// part download). The parts list is the authoritative record; use this to resync.
+unsigned short CountActiveParts( DOWNLOAD_INFO *di );
 
 void AddToMoveFileQueue( DOWNLOAD_INFO *di );
 
