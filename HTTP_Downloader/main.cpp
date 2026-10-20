@@ -115,6 +115,12 @@ bool g_perform_shutdown_action = false;
 bool g_clean_tray_icon = false;
 
 #ifndef NTDLL_USE_STATIC_LIB
+int APIENTRY _WinMain();
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd)
+{
+	_WinMain();
+	return 0;
+}
 int APIENTRY _WinMain()
 #else
 int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow )
@@ -925,6 +931,14 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 
 	read_config();
 
+	// Load the proxy list. If no proxy list file exists yet (first run of this version),
+	// migrate the legacy HTTP/HTTPS/SOCKS triple configuration into list entries.
+	if ( ReadProxyList() != 0 )
+	{
+		MigrateLegacyProxyConfig();
+		SaveProxyList();
+	}
+
 #ifdef ENABLE_LOGGING
 	// Permanent logger-mode debug trace: shows the reallocation settings that were loaded,
 	// so the test harness can verify a debug reset was persisted.
@@ -1454,6 +1468,12 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 
 		wcex.hbrBackground = g_hBrush_window_background;
 	}
+
+	// g_hBrush_window_background is never created (it stays NULL), and a NULL class brush
+	// means the window never erases its background. Unpainted/undefined backgrounds make
+	// GDI disable ClearType for text drawn on them ("bold black" text). Fall back to the
+	// system face color so every window class gets a real, solid brush.
+	wcex.hbrBackground = ( g_hBrush_window_background != NULL ? g_hBrush_window_background : ( HBRUSH )( COLOR_3DFACE + 1 ) );
 #endif
 
 	// Since the main window's children cover it up, we don't need to redraw the window.
@@ -1553,6 +1573,15 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 
 	wcex.lpfnWndProc	= ProxyTabWndProc;
 	wcex.lpszClassName	= L"class_proxy_tab";
+
+	if ( !_RegisterClassExW( &wcex ) )
+	{
+		fail_type = 1;
+		goto CLEANUP;
+	}
+
+	wcex.lpfnWndProc	= ProxyEditWndProc;
+	wcex.lpszClassName	= L"class_proxy_edit";
 
 	if ( !_RegisterClassExW( &wcex ) )
 	{
@@ -1761,6 +1790,8 @@ CLEANUP:
 	// Server
 
 	CleanupServerInfo();
+
+	CleanupProxyList();
 
 	if ( cfg_server_hostname != NULL ) { GlobalFree( cfg_server_hostname ); }
 

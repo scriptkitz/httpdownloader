@@ -2912,8 +2912,8 @@ char ParseHTTPHeader( SOCKET_CONTEXT *context, char *header_buffer, unsigned int
 
 		if ( context->header_info.http_status == 407 )
 		{
-			bool use_http_proxy = cfg_enable_proxy;
-			bool use_https_proxy = cfg_enable_proxy_s;
+			bool use_http_proxy = false;
+			bool use_https_proxy = false;
 
 			if ( context->download_info != NULL && context->download_info->proxy_info != NULL )
 			{
@@ -2924,6 +2924,21 @@ char ParseHTTPHeader( SOCKET_CONTEXT *context, char *header_buffer, unsigned int
 				else if ( context->download_info->proxy_info->type == 2 )
 				{
 					use_https_proxy = true;
+				}
+			}
+			else
+			{
+				PROXY_ENTRY *active_proxy = GetActiveProxyForProtocol( context->request_info.protocol );
+				if ( active_proxy != NULL )
+				{
+					if ( active_proxy->type == PROXY_TYPE_HTTP )
+					{
+						use_http_proxy = true;
+					}
+					else if ( active_proxy->type == PROXY_TYPE_HTTPS )
+					{
+						use_https_proxy = true;
+					}
 				}
 			}
 
@@ -3306,8 +3321,8 @@ char GetHTTPHeader( SOCKET_CONTEXT *context, char *header_buffer, unsigned int h
 			}
 			else// if ( context->header_info.http_status == 407 )
 			{
-				bool use_http_proxy = cfg_enable_proxy;
-				bool use_https_proxy = cfg_enable_proxy_s;
+				bool use_http_proxy = false;
+				bool use_https_proxy = false;
 
 				if ( context->download_info != NULL && context->download_info->proxy_info != NULL )
 				{
@@ -3318,6 +3333,21 @@ char GetHTTPHeader( SOCKET_CONTEXT *context, char *header_buffer, unsigned int h
 					else if ( context->download_info->proxy_info->type == 2 )
 					{
 						use_https_proxy = true;
+					}
+				}
+				else
+				{
+					PROXY_ENTRY *active_proxy = GetActiveProxyForProtocol( context->request_info.protocol );
+					if ( active_proxy != NULL )
+					{
+						if ( active_proxy->type == PROXY_TYPE_HTTP )
+						{
+							use_http_proxy = true;
+						}
+						else if ( active_proxy->type == PROXY_TYPE_HTTPS )
+						{
+							use_https_proxy = true;
+						}
 					}
 				}
 

@@ -43,6 +43,7 @@ LRESULT CALLBACK SFTPTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
 LRESULT CALLBACK SFTPFpsTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam );
 LRESULT CALLBACK SFTPKeysTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam );
 LRESULT CALLBACK ProxyTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam );
+LRESULT CALLBACK ProxyEditWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam );
 LRESULT CALLBACK AdvancedTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam );
 
 #endif

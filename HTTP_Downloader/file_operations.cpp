@@ -18,6 +18,8 @@
 
 #include "globals.h"
 
+#include "doublylinkedlist.h"
+
 #include "lite_shell32.h"
 #include "lite_ole32.h"
 #include "lite_gdi32.h"
@@ -92,7 +94,7 @@ RETRY_OPEN:
 						{
 							cfg_buf[ fz ] = 0;	// Guarantee a NULL terminated buffer.
 
-							reserved = 1024 - ( version < 0x09 ? 721 : 749 );
+							reserved = 1024 - ( version >= 0x0A ? 750 : ( version < 0x09 ? 721 : 749 ) );
 
 							char *next = cfg_buf;
 
@@ -554,6 +556,12 @@ RETRY_OPEN:
 
 								_memcpy_s( &cfg_category_move, sizeof( bool ), next, sizeof( bool ) );
 								next += sizeof( bool );
+							}
+
+							if ( version >= 0x0A )
+							{
+								_memcpy_s( &cfg_selected_proxy, sizeof( unsigned char ), next, sizeof( unsigned char ) );
+								next += sizeof( unsigned char );
 							}
 
 
@@ -1334,14 +1342,14 @@ RETRY_OPEN:
 		_memzero( &lfo, sizeof( OVERLAPPED ) );
 		LockFileEx( hFile_cfg, LOCKFILE_EXCLUSIVE_LOCK, 0, MAXDWORD, MAXDWORD, &lfo );
 
-		int reserved = 1024 - 749;
+		int reserved = 1024 - 750;
 		int size = ( sizeof( int ) * ( 11 + NUM_COLUMNS ) ) +
 				   ( sizeof( unsigned short ) * 7 ) +
 				   ( sizeof( char ) * ( 35 + NUM_COLUMNS + KEX_ALGORITHM_COUNT + HOST_KEY_COUNT + ENCRYPTION_CIPHER_COUNT ) ) +
 				   ( sizeof( bool ) * 54 ) +
 				   ( sizeof( unsigned long ) * 7 ) +
 				   ( sizeof( LONG ) * 4 ) +
-				   ( sizeof( BYTE ) * 6 ) +
+				   ( sizeof( BYTE ) * 7 ) +
 				   ( sizeof( COLORREF ) * ( NUM_COLORS + 11 + TD_NUM_COLORS ) ) +
 				   ( sizeof( unsigned long long ) * 5 ) + reserved;
 		int pos = 0;
@@ -1785,6 +1793,9 @@ RETRY_OPEN:
 
 		_memcpy_s( write_buf + pos, size - pos, &cfg_category_move, sizeof( bool ) );
 		pos += sizeof( bool );
+
+		_memcpy_s( write_buf + pos, size - pos, &cfg_selected_proxy, sizeof( unsigned char ) );
+		pos += sizeof( unsigned char );
 
 		//
 
@@ -4168,4 +4179,422 @@ wchar_t *read_url_list_file( wchar_t *file_path, unsigned int &url_list_length )
 	}
 
 	return urls;
+}
+
+// === Proxy list (Options -> Proxy page). Stored in a separate file because the main
+// settings file uses a fixed 1024-byte layout that cannot hold a variable-length list. ===
+
+char ReadProxyList( void )
+{
+	char ret_status = 0;
+
+	// Clean up any previously loaded entries.
+	CleanupProxyList();
+	cfg_selected_proxy = 0;
+
+	wchar_t file_path[ MAX_PATH ];
+	_wmemcpy_s( file_path, MAX_PATH, g_base_directory, g_base_directory_length );
+	_wmemcpy_s( file_path + g_base_directory_length, MAX_PATH - g_base_directory_length, L"\\proxy_list\0", 12 );
+
+	HANDLE hFile = CreateFile( file_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+	if ( hFile != INVALID_HANDLE_VALUE )
+	{
+		DWORD read = 0;
+		DWORD fz = GetFileSize( hFile, NULL );
+
+		if ( fz >= 6 && fz < 1048576 )	// Magic (4) + count (1) + selected (1) at minimum.
+		{
+			char magic[ 4 ];
+			if ( ReadFile( hFile, magic, 4, &read, NULL ) != FALSE && read == 4 && _memcmp( magic, "HDL1", 4 ) == 0 )
+			{
+				unsigned char count = 0;
+				unsigned char selected = 0;
+
+				if ( ReadFile( hFile, &count, 1, &read, NULL ) != FALSE && read == 1 &&
+					 ReadFile( hFile, &selected, 1, &read, NULL ) != FALSE && read == 1 )
+				{
+					bool success = true;
+
+					for ( unsigned char i = 0; i < count; ++i )
+					{
+						unsigned short entry_length = 0;
+						if ( ReadFile( hFile, &entry_length, sizeof( unsigned short ), &read, NULL ) == FALSE || read != sizeof( unsigned short ) || entry_length < 10 || entry_length > 16384 )
+						{
+							success = false;
+							break;
+						}
+
+						char *entry_buf = ( char * )GlobalAlloc( GMEM_FIXED, sizeof( char ) * entry_length + 1 );
+						if ( entry_buf == NULL )
+						{
+							success = false;
+							break;
+						}
+
+						if ( ReadFile( hFile, entry_buf, entry_length, &read, NULL ) == FALSE || read != entry_length )
+						{
+							GlobalFree( entry_buf );
+							success = false;
+							break;
+						}
+
+						entry_buf[ entry_length ] = 0;	// Sanity.
+
+						char *p = entry_buf;
+						unsigned char type = ( unsigned char )p[ 0 ];
+						unsigned char address_type = ( unsigned char )p[ 1 ];
+						unsigned long ip_address = *( ( unsigned long * )( p + 2 ) );
+						unsigned short port = *( ( unsigned short * )( p + 6 ) );
+						bool use_authentication = ( p[ 8 ] != 0 ? true : false );
+						bool resolve_domain_names = ( p[ 9 ] != 0 ? true : false );
+						p += 10;
+
+						unsigned int remaining = entry_length - 10;
+
+						// Hostname.
+						int s_len = lstrlenA( p ) + 1;
+						if ( ( unsigned int )s_len > remaining ) { GlobalFree( entry_buf ); success = false; break; }
+						wchar_t *hostname = ( s_len > 1 ? UTF8StringToWideString( p, s_len ) : NULL );
+						p += s_len; remaining -= s_len;
+
+						// Username.
+						s_len = lstrlenA( p ) + 1;
+						if ( ( unsigned int )s_len > remaining ) { GlobalFree( hostname ); GlobalFree( entry_buf ); success = false; break; }
+						wchar_t *username = ( s_len > 1 ? UTF8StringToWideString( p, s_len ) : NULL );
+						p += s_len; remaining -= s_len;
+
+						// Password.
+						s_len = lstrlenA( p ) + 1;
+						if ( ( unsigned int )s_len > remaining ) { GlobalFree( username ); GlobalFree( hostname ); GlobalFree( entry_buf ); success = false; break; }
+						wchar_t *password = ( s_len > 1 ? UTF8StringToWideString( p, s_len ) : NULL );
+						p += s_len; remaining -= s_len;
+
+						// Ident username (SOCKS 4/5).
+						s_len = lstrlenA( p ) + 1;
+						if ( ( unsigned int )s_len > remaining ) { GlobalFree( password ); GlobalFree( username ); GlobalFree( hostname ); GlobalFree( entry_buf ); success = false; break; }
+						wchar_t *ident_username = ( s_len > 1 ? UTF8StringToWideString( p, s_len ) : NULL );
+						p += s_len; remaining -= s_len;
+
+						// Alias (optional, appended after the ident username; older files
+						// have no alias and simply run out of bytes here).
+						wchar_t *alias = NULL;
+						if ( remaining > 0 )
+						{
+							s_len = lstrlenA( p ) + 1;
+							if ( ( unsigned int )s_len > remaining ) { GlobalFree( ident_username ); GlobalFree( password ); GlobalFree( username ); GlobalFree( hostname ); GlobalFree( entry_buf ); success = false; break; }
+							alias = ( s_len > 1 ? UTF8StringToWideString( p, s_len ) : NULL );
+							p += s_len; remaining -= s_len;
+						}
+
+						GlobalFree( entry_buf );
+
+						if ( type > PROXY_TYPE_SOCKS5 || address_type > 1 )
+						{
+							GlobalFree( alias );
+							GlobalFree( ident_username );
+							GlobalFree( password );
+							GlobalFree( username );
+							GlobalFree( hostname );
+							success = false;
+							break;
+						}
+
+						PROXY_ENTRY *pe = ( PROXY_ENTRY * )GlobalAlloc( GPTR, sizeof( PROXY_ENTRY ) );
+						if ( pe == NULL )
+						{
+							GlobalFree( alias );
+							GlobalFree( ident_username );
+							GlobalFree( password );
+							GlobalFree( username );
+							GlobalFree( hostname );
+							success = false;
+							break;
+						}
+
+						pe->alias = alias;
+						pe->type = type;
+						pe->address_type = address_type;
+						pe->ip_address = ip_address;
+						pe->hostname = hostname;
+						pe->port = port;
+						pe->use_authentication = use_authentication;
+						pe->username = username;
+						pe->password = password;
+						pe->resolve_domain_names = resolve_domain_names;
+						pe->ident_username = ident_username;
+
+						DoublyLinkedList *node = DLL_CreateNode( pe );
+						if ( node == NULL )
+						{
+							FreeProxyEntry( pe );
+							success = false;
+							break;
+						}
+
+						DLL_AddNode( &g_proxy_list, node, -1 );
+					}
+
+					if ( success )
+					{
+						// Clamp the selection and resolve it to an entry.
+						DoublyLinkedList *node = g_proxy_list;
+						for ( unsigned char i = 1; i < selected && node != NULL; ++i )
+						{
+							node = node->next;
+						}
+
+						if ( node != NULL )
+						{
+							cfg_selected_proxy = selected;
+							g_active_proxy = ( PROXY_ENTRY * )node->data;
+
+							UpdateActiveProxyRuntimeFields();
+						}
+						else
+						{
+							cfg_selected_proxy = 0;
+							g_active_proxy = NULL;
+						}
+					}
+					else
+					{
+						ret_status = -2;	// Bad entry.
+
+						CleanupProxyList();
+					}
+				}
+				else
+				{
+					ret_status = -2;
+				}
+			}
+			else
+			{
+				ret_status = -2;	// Bad magic.
+			}
+		}
+		else
+		{
+			ret_status = -2;	// Bad size.
+		}
+
+		CloseHandle( hFile );
+	}
+	else
+	{
+		ret_status = -1;	// File doesn't exist (or can't be opened).
+	}
+
+	return ret_status;
+}
+
+char SaveProxyList( void )
+{
+	char ret_status = 0;
+
+	wchar_t file_path[ MAX_PATH ];
+	_wmemcpy_s( file_path, MAX_PATH, g_base_directory, g_base_directory_length );
+	_wmemcpy_s( file_path + g_base_directory_length, MAX_PATH - g_base_directory_length, L"\\proxy_list\0", 12 );
+
+	HANDLE hFile = CreateFile( file_path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
+	if ( hFile != INVALID_HANDLE_VALUE )
+	{
+		OVERLAPPED lfo;
+		_memzero( &lfo, sizeof( OVERLAPPED ) );
+		LockFileEx( hFile, LOCKFILE_EXCLUSIVE_LOCK, 0, MAXDWORD, MAXDWORD, &lfo );
+
+		// Count the entries.
+		unsigned char count = 0;
+		DoublyLinkedList *node = g_proxy_list;
+
+		while ( node != NULL )
+		{
+			if ( count < 0xFF ) { ++count; }
+			node = node->next;
+		}
+
+		DWORD write = 0;
+
+		char header[ 6 ];
+		_memcpy_s( header, 6, "HDL1", 4 );
+		header[ 4 ] = ( char )count;
+		header[ 5 ] = ( char )( cfg_selected_proxy > count ? 0 : cfg_selected_proxy );
+		WriteFile( hFile, header, 6, &write, NULL );
+
+		node = g_proxy_list;
+
+		while ( node != NULL )
+		{
+			PROXY_ENTRY *pe = ( PROXY_ENTRY * )node->data;
+
+			if ( pe != NULL )
+			{
+				int alias_length = 0; char *utf8_alias = ( pe->alias != NULL ? WideStringToUTF8String( pe->alias, &alias_length ) : NULL );
+				int hostname_length = 0; char *utf8_hostname = ( pe->hostname != NULL ? WideStringToUTF8String( pe->hostname, &hostname_length ) : NULL );
+				int username_length = 0; char *utf8_username = ( pe->username != NULL ? WideStringToUTF8String( pe->username, &username_length ) : NULL );
+				int password_length = 0; char *utf8_password = ( pe->password != NULL ? WideStringToUTF8String( pe->password, &password_length ) : NULL );
+				int ident_length = 0; char *utf8_ident = ( pe->ident_username != NULL ? WideStringToUTF8String( pe->ident_username, &ident_length ) : NULL );
+
+				if ( alias_length <= 0 ) { alias_length = 1; }	// Empty string + NULL.
+				if ( hostname_length <= 0 ) { hostname_length = 1; }	// Empty string + NULL.
+				if ( username_length <= 0 ) { username_length = 1; }
+				if ( password_length <= 0 ) { password_length = 1; }
+				if ( ident_length <= 0 ) { ident_length = 1; }
+
+				unsigned short entry_length = ( unsigned short )( 10 + hostname_length + username_length + password_length + ident_length + alias_length );
+
+				char *entry_buf = ( char * )GlobalAlloc( GMEM_FIXED, sizeof( char ) * ( entry_length + 2 ) + 1 );
+				if ( entry_buf != NULL )
+				{
+					char *p = entry_buf;
+
+					*( ( unsigned short * )p ) = entry_length; p += 2;
+
+					p[ 0 ] = ( char )pe->type;
+					p[ 1 ] = ( char )pe->address_type;
+					*( ( unsigned long * )( p + 2 ) ) = pe->ip_address;
+					*( ( unsigned short * )( p + 6 ) ) = pe->port;
+					p[ 8 ] = ( pe->use_authentication ? 1 : 0 );
+					p[ 9 ] = ( pe->resolve_domain_names ? 1 : 0 );
+					p += 10;
+
+					_memcpy_s( p, hostname_length, ( utf8_hostname != NULL ? utf8_hostname : "" ), hostname_length ); p += hostname_length;
+					_memcpy_s( p, username_length, ( utf8_username != NULL ? utf8_username : "" ), username_length ); p += username_length;
+					_memcpy_s( p, password_length, ( utf8_password != NULL ? utf8_password : "" ), password_length ); p += password_length;
+					_memcpy_s( p, ident_length, ( utf8_ident != NULL ? utf8_ident : "" ), ident_length ); p += ident_length;
+					_memcpy_s( p, alias_length, ( utf8_alias != NULL ? utf8_alias : "" ), alias_length ); p += alias_length;
+
+					WriteFile( hFile, entry_buf, ( DWORD )( entry_length + 2 ), &write, NULL );
+
+					GlobalFree( entry_buf );
+				}
+
+				GlobalFree( utf8_alias );
+				GlobalFree( utf8_hostname );
+				GlobalFree( utf8_username );
+				GlobalFree( utf8_password );
+				GlobalFree( utf8_ident );
+			}
+
+			node = node->next;
+		}
+
+		UnlockFileEx( hFile, 0, MAXDWORD, MAXDWORD, &lfo );
+
+		CloseHandle( hFile );
+	}
+	else
+	{
+		ret_status = -1;
+	}
+
+	return ret_status;
+}
+
+// Creates list entries from the legacy triple proxy configuration (HTTP/HTTPS/SOCKS).
+// Called once after read_config() when no proxy_list file exists yet.
+void MigrateLegacyProxyConfig( void )
+{
+	unsigned char selected = 0;
+
+	if ( cfg_enable_proxy )
+	{
+		PROXY_ENTRY *pe = ( PROXY_ENTRY * )GlobalAlloc( GPTR, sizeof( PROXY_ENTRY ) );
+		if ( pe != NULL )
+		{
+			pe->type = PROXY_TYPE_HTTP;
+			pe->address_type = cfg_address_type;
+			pe->ip_address = cfg_ip_address;
+			pe->hostname = ( cfg_hostname != NULL ? GlobalStrDupW( cfg_hostname ) : NULL );
+			pe->port = cfg_port;
+			pe->use_authentication = ( cfg_proxy_auth_username != NULL ? true : false );
+			pe->username = ( cfg_proxy_auth_username != NULL ? GlobalStrDupW( cfg_proxy_auth_username ) : NULL );
+			pe->password = ( cfg_proxy_auth_password != NULL ? GlobalStrDupW( cfg_proxy_auth_password ) : NULL );
+
+			DoublyLinkedList *node = DLL_CreateNode( pe );
+			if ( node != NULL )
+			{
+				DLL_AddNode( &g_proxy_list, node, -1 );
+				if ( selected == 0 ) { selected = 1; }
+			}
+			else
+			{
+				FreeProxyEntry( pe );
+			}
+		}
+	}
+
+	if ( cfg_enable_proxy_s )
+	{
+		PROXY_ENTRY *pe = ( PROXY_ENTRY * )GlobalAlloc( GPTR, sizeof( PROXY_ENTRY ) );
+		if ( pe != NULL )
+		{
+			pe->type = PROXY_TYPE_HTTPS;
+			pe->address_type = cfg_address_type_s;
+			pe->ip_address = cfg_ip_address_s;
+			pe->hostname = ( cfg_hostname_s != NULL ? GlobalStrDupW( cfg_hostname_s ) : NULL );
+			pe->port = cfg_port_s;
+			pe->use_authentication = ( cfg_proxy_auth_username_s != NULL ? true : false );
+			pe->username = ( cfg_proxy_auth_username_s != NULL ? GlobalStrDupW( cfg_proxy_auth_username_s ) : NULL );
+			pe->password = ( cfg_proxy_auth_password_s != NULL ? GlobalStrDupW( cfg_proxy_auth_password_s ) : NULL );
+
+			DoublyLinkedList *node = DLL_CreateNode( pe );
+			if ( node != NULL )
+			{
+				DLL_AddNode( &g_proxy_list, node, -1 );
+				if ( selected == 0 ) { selected = 2; }
+			}
+			else
+			{
+				FreeProxyEntry( pe );
+			}
+		}
+	}
+
+	if ( cfg_enable_proxy_socks )
+	{
+		PROXY_ENTRY *pe = ( PROXY_ENTRY * )GlobalAlloc( GPTR, sizeof( PROXY_ENTRY ) );
+		if ( pe != NULL )
+		{
+			pe->type = ( cfg_socks_type == SOCKS_TYPE_V5 ? PROXY_TYPE_SOCKS5 : PROXY_TYPE_SOCKS4 );
+			pe->address_type = cfg_address_type_socks;
+			pe->ip_address = cfg_ip_address_socks;
+			pe->hostname = ( cfg_hostname_socks != NULL ? GlobalStrDupW( cfg_hostname_socks ) : NULL );
+			pe->port = cfg_port_socks;
+			pe->use_authentication = cfg_use_authentication_socks;
+			pe->username = ( cfg_proxy_auth_username_socks != NULL ? GlobalStrDupW( cfg_proxy_auth_username_socks ) : NULL );
+			pe->password = ( cfg_proxy_auth_password_socks != NULL ? GlobalStrDupW( cfg_proxy_auth_password_socks ) : NULL );
+			pe->resolve_domain_names = ( pe->type == PROXY_TYPE_SOCKS4 ? cfg_resolve_domain_names_v4a : cfg_resolve_domain_names );
+			pe->ident_username = ( cfg_proxy_auth_ident_username_socks != NULL ? GlobalStrDupW( cfg_proxy_auth_ident_username_socks ) : NULL );
+
+			DoublyLinkedList *node = DLL_CreateNode( pe );
+			if ( node != NULL )
+			{
+				DLL_AddNode( &g_proxy_list, node, -1 );
+				if ( selected == 0 ) { selected = 3; }
+			}
+			else
+			{
+				FreeProxyEntry( pe );
+			}
+		}
+	}
+
+	// Resolve the selection (1-based) to the active entry.
+	if ( selected > 0 )
+	{
+		DoublyLinkedList *node = g_proxy_list;
+		for ( unsigned char i = 1; i < selected && node != NULL; ++i )
+		{
+			node = node->next;
+		}
+
+		if ( node != NULL )
+		{
+			cfg_selected_proxy = selected;
+			g_active_proxy = ( PROXY_ENTRY * )node->data;
+
+			UpdateActiveProxyRuntimeFields();
+		}
+	}
 }

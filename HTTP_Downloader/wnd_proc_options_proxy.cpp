@@ -16,550 +16,860 @@
 	along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "options.h"
-#include "connection.h"
-#include "lite_normaliz.h"
-#include "lite_gdi32.h"
+#include "globals.h"
 #include "utilities.h"
+#include "string_tables.h"
+#include "file_operations.h"
+#include "doublylinkedlist.h"
+#include "options.h"
+#include "wnd_proc.h"
+#include "cmessagebox.h"
+#include "lite_gdi32.h"
 
-#define BTN_PROXY					1001
+// Proxy tab layout (Options window).
+#define LIST_PROXY			1001
+#define BTN_PROXY_ADD		1002
+#define BTN_PROXY_EDIT		1003
+#define BTN_PROXY_REMOVE	1004
+#define COMBO_PROXY_SELECT	1005
+#define STATIC_PROXY_SELECT	1006
 
-#define BTN_TYPE_HOST				1002
-#define BTN_TYPE_IP_ADDRESS			1003
-#define EDIT_HOST					1004
-#define EDIT_IP_ADDRESS				1005
-#define EDIT_PORT					1006
+// Proxy edit dialog controls.
+#define EDIT_DLG_CANCEL		1011
+#define EDIT_DLG_SAVE		1012
+#define COMBO_PROXY_TYPE	1013
+#define BTN_TYPE_HOST		1014
+#define BTN_TYPE_IP			1015
+#define EDIT_HOSTNAME		1016
+#define EDIT_IP_ADDRESS		1017
+#define EDIT_PORT			1018
+#define BTN_USE_AUTH		1019
+#define EDIT_USERNAME		1020
+#define EDIT_PASSWORD		1021
+#define BTN_RESOLVE_DOMAIN	1022
+#define EDIT_IDENT			1023
+#define EDIT_ALIAS			1024
 
-#define EDIT_AUTH_USERNAME			1007
-#define EDIT_AUTH_PASSWORD			1008
+HWND g_hWnd_proxy_list = NULL;
+HWND g_hWnd_btn_proxy_add = NULL;
+HWND g_hWnd_btn_proxy_edit = NULL;
+HWND g_hWnd_btn_proxy_remove = NULL;
+HWND g_hWnd_combo_proxy_select = NULL;
+HWND g_hWnd_static_proxy_select = NULL;
 
-#define BTN_PROXY_S					1009
+HWND g_hWnd_proxy_edit = NULL;		// Proxy edit dialog.
 
-#define BTN_TYPE_HOST_S				1010
-#define BTN_TYPE_IP_ADDRESS_S		1011
-#define EDIT_HOST_S					1012
-#define EDIT_IP_ADDRESS_S			1013
-#define EDIT_PORT_S					1014
+// The dialog uses its OWN font instance. Sharing the global hFont_options font object
+// across a second window made GDI realize/rescale that shared object with degraded text
+// rendering (grayscale, no ClearType subpixels) for every window afterwards.
+HFONT g_hFont_proxy_edit = NULL;
 
-#define EDIT_AUTH_USERNAME_S		1015
-#define EDIT_AUTH_PASSWORD_S		1016
+PROXY_ENTRY *g_edit_proxy = NULL;	// Working copy being edited (or a fresh entry for Add).
+bool g_edit_new = false;
 
-#define BTN_PROXY_SOCKS				1017
+void GetProxyTypeText( unsigned char type, wchar_t *buf, unsigned int buf_size )
+{
+	switch ( type )
+	{
+		case PROXY_TYPE_HTTPS: { __snwprintf( buf, buf_size, L"HTTPS" ); } break;
+		case PROXY_TYPE_SOCKS4: { __snwprintf( buf, buf_size, L"SOCKS v4" ); } break;
+		case PROXY_TYPE_SOCKS5: { __snwprintf( buf, buf_size, L"SOCKS v5" ); } break;
+		default: { __snwprintf( buf, buf_size, L"HTTP" ); } break;
+	}
+}
 
-#define BTN_TYPE_SOCKS4				1018
-#define BTN_TYPE_SOCKS5				1019
+void GetProxyAddressText( PROXY_ENTRY *pe, wchar_t *buf, unsigned int buf_size )
+{
+	if ( pe == NULL )
+	{
+		buf[ 0 ] = 0;
+		return;
+	}
 
-#define BTN_TYPE_HOST_SOCKS			1020
-#define BTN_TYPE_IP_ADDRESS_SOCKS	1021
-#define EDIT_HOST_SOCKS				1022
-#define EDIT_IP_ADDRESS_SOCKS		1023
-#define EDIT_PORT_SOCKS				1024
+	if ( pe->address_type == 1 )	// IPv4 address.
+	{
+		// ip_address is stored in IPM_GETADDRESS format (field 1 = high byte); on a
+		// little-endian machine the first field lives in the last memory byte.
+		unsigned char *ip = ( unsigned char * )&pe->ip_address;
+		__snwprintf( buf, buf_size, L"%lu.%lu.%lu.%lu", ip[ 3 ], ip[ 2 ], ip[ 1 ], ip[ 0 ] );
+	}
+	else
+	{
+		__snwprintf( buf, buf_size, L"%s", ( pe->hostname != NULL ? pe->hostname : L"" ) );
+	}
+}
 
-#define EDIT_AUTH_IDENT_USERNAME_SOCKS	1025
+void RefreshProxyList( void )
+{
+	if ( g_hWnd_proxy_list == NULL )
+	{
+		return;
+	}
 
-#define BTN_RESOLVE_DOMAIN_NAMES_V4A	1026
+	_SendMessageW( g_hWnd_proxy_list, WM_SETREDRAW, FALSE, 0 );
+	_SendMessageW( g_hWnd_proxy_list, LVM_DELETEALLITEMS, 0, 0 );
 
-#define BTN_AUTHENTICATION_SOCKS	1027
+	LVITEMW lvi;
+	_memzero( &lvi, sizeof( LVITEMW ) );
+	lvi.mask = LVIF_TEXT;
+	lvi.iSubItem = 0;
 
-#define EDIT_AUTH_USERNAME_SOCKS	1028
-#define EDIT_AUTH_PASSWORD_SOCKS	1029
+	wchar_t buf[ 512 ];
+	wchar_t addr[ 512 ];
 
-#define BTN_RESOLVE_DOMAIN_NAMES	1030
+	DoublyLinkedList *node = g_proxy_list;
+	int index = 0;
 
-// Proxy Tab
-// HTTP proxy
-HWND g_hWnd_chk_proxy = NULL;
+	while ( node != NULL )
+	{
+		PROXY_ENTRY *pe = ( PROXY_ENTRY * )node->data;
 
-HWND g_hWnd_ip_address = NULL;
-HWND g_hWnd_hostname = NULL;
-HWND g_hWnd_port = NULL;
+		if ( pe != NULL )
+		{
+			GetProxyTypeText( pe->type, buf, 512 );
+			lvi.pszText = buf;
+			lvi.iItem = index;
+			lvi.iSubItem = 0;	// Must be 0 for insertion; it's left at 3 by the sub-item updates below.
+			_SendMessageW( g_hWnd_proxy_list, LVM_INSERTITEMW, 0, ( LPARAM )&lvi );
 
-HWND g_hWnd_static_port = NULL;
-HWND g_hWnd_static_colon = NULL;
+			GetProxyAddressText( pe, addr, 512 );
+			__snwprintf( buf, 512, L"%s", addr );
+			lvi.iSubItem = 1;
+			_SendMessageW( g_hWnd_proxy_list, LVM_SETITEMTEXTW, ( WPARAM )index, ( LPARAM )&lvi );
 
-HWND g_hWnd_chk_type_hostname = NULL;
-HWND g_hWnd_chk_type_ip_address = NULL;
+			__snwprintf( buf, 512, L"%hu", pe->port );
+			lvi.iSubItem = 2;
+			_SendMessageW( g_hWnd_proxy_list, LVM_SETITEMTEXTW, ( WPARAM )index, ( LPARAM )&lvi );
 
-HWND g_hWnd_static_auth_username = NULL;
-HWND g_hWnd_auth_username = NULL;
-HWND g_hWnd_static_auth_password = NULL;
-HWND g_hWnd_auth_password = NULL;
+			__snwprintf( buf, 512, L"%s", ( pe->use_authentication ? L"Yes" : L"No" ) );
+			lvi.iSubItem = 3;
+			_SendMessageW( g_hWnd_proxy_list, LVM_SETITEMTEXTW, ( WPARAM )index, ( LPARAM )&lvi );
 
-HWND g_hWnd_static_proxy_hoz1 = NULL;
+			++index;
+		}
 
-// HTTPS proxy
-HWND g_hWnd_chk_proxy_s = NULL;
+		node = node->next;
+	}
 
-HWND g_hWnd_ip_address_s = NULL;
-HWND g_hWnd_hostname_s = NULL;
-HWND g_hWnd_port_s = NULL;
+	_SendMessageW( g_hWnd_proxy_list, WM_SETREDRAW, TRUE, 0 );
 
-HWND g_hWnd_static_port_s = NULL;
-HWND g_hWnd_static_colon_s = NULL;
+	// Restore the selection if possible.
+	if ( cfg_selected_proxy > 0 && cfg_selected_proxy <= index )
+	{
+		LVITEMW lvis;
+		_memzero( &lvis, sizeof( LVITEMW ) );
+		lvis.state = LVIS_SELECTED;
+		lvis.stateMask = LVIS_SELECTED;
+		_SendMessageW( g_hWnd_proxy_list, LVM_SETITEMSTATE, ( WPARAM )( cfg_selected_proxy - 1 ), ( LPARAM )&lvis );
+	}
+}
 
-HWND g_hWnd_chk_type_hostname_s = NULL;
-HWND g_hWnd_chk_type_ip_address_s = NULL;
+void RefreshProxyCombo( void )
+{
+	if ( g_hWnd_combo_proxy_select == NULL )
+	{
+		return;
+	}
 
-HWND g_hWnd_static_auth_username_s = NULL;
-HWND g_hWnd_auth_username_s = NULL;
-HWND g_hWnd_static_auth_password_s = NULL;
-HWND g_hWnd_auth_password_s = NULL;
+	_SendMessageW( g_hWnd_combo_proxy_select, CB_RESETCONTENT, 0, 0 );
 
-HWND g_hWnd_static_proxy_hoz2 = NULL;
+	_SendMessageW( g_hWnd_combo_proxy_select, CB_ADDSTRING, 0, ( LPARAM )L"No proxy" );
 
-// SOCKS proxy
-HWND g_hWnd_chk_proxy_socks = NULL;
+	wchar_t buf[ 512 ];
+	wchar_t addr[ 512 ];
+	wchar_t type_buf[ 16 ];
 
-HWND g_hWnd_chk_type_socks4 = NULL;
-HWND g_hWnd_chk_type_socks5 = NULL;
+	DoublyLinkedList *node = g_proxy_list;
 
-HWND g_hWnd_ip_address_socks = NULL;
-HWND g_hWnd_hostname_socks = NULL;
-HWND g_hWnd_port_socks = NULL;
+	while ( node != NULL )
+	{
+		PROXY_ENTRY *pe = ( PROXY_ENTRY * )node->data;
 
-HWND g_hWnd_static_port_socks = NULL;
-HWND g_hWnd_static_colon_socks = NULL;
+		if ( pe != NULL )
+		{
+			GetProxyTypeText( pe->type, type_buf, 16 );
+			GetProxyAddressText( pe, addr, 512 );
 
-HWND g_hWnd_chk_type_hostname_socks = NULL;
-HWND g_hWnd_chk_type_ip_address_socks = NULL;
+			// Show the alias when present, else "type | address:port".
+			if ( pe->alias != NULL && pe->alias[ 0 ] != 0 )
+			{
+				__snwprintf( buf, 512, L"%s", pe->alias );
+			}
+			else
+			{
+				__snwprintf( buf, 512, L"%s | %s:%hu", type_buf, addr, pe->port );
+			}
 
-HWND g_hWnd_static_auth_ident_username_socks = NULL;
-HWND g_hWnd_auth_ident_username_socks = NULL;
+			_SendMessageW( g_hWnd_combo_proxy_select, CB_ADDSTRING, 0, ( LPARAM )buf );
+		}
 
-HWND g_hWnd_chk_resolve_domain_names_v4a = NULL;
+		node = node->next;
+	}
 
-HWND g_hWnd_chk_use_authentication_socks = NULL;
+	_SendMessageW( g_hWnd_combo_proxy_select, CB_SETCURSEL, cfg_selected_proxy, 0 );
+}
 
-HWND g_hWnd_static_auth_username_socks = NULL;
-HWND g_hWnd_auth_username_socks = NULL;
-HWND g_hWnd_static_auth_password_socks = NULL;
-HWND g_hWnd_auth_password_socks = NULL;
+unsigned char GetProxyListSelection( void )
+{
+	unsigned char index = 0;
 
-HWND g_hWnd_chk_resolve_domain_names = NULL;
+	if ( g_hWnd_proxy_list != NULL )
+	{
+		int sel = ( int )_SendMessageW( g_hWnd_proxy_list, LVM_GETNEXTITEM, ( WPARAM )-1, LVNI_SELECTED );
+		if ( sel >= 0 && sel < 0xFF )
+		{
+			index = ( unsigned char )( sel + 1 );
+		}
+	}
 
-HFONT hFont_copy_proxy = NULL;
+	return index;	// 1-based. 0 = nothing selected.
+}
+
+void ApplyProxySelection( unsigned char selection )
+{
+	cfg_selected_proxy = selection;
+	g_active_proxy = NULL;
+
+	if ( selection > 0 )
+	{
+		DoublyLinkedList *node = g_proxy_list;
+		for ( unsigned char i = 1; i < selection && node != NULL; ++i )
+		{
+			node = node->next;
+		}
+
+		if ( node != NULL )
+		{
+			g_active_proxy = ( PROXY_ENTRY * )node->data;
+		}
+		else
+		{
+			cfg_selected_proxy = 0;
+		}
+	}
+
+	UpdateActiveProxyRuntimeFields();
+	SaveProxyList();
+}
+
+void UpdateProxyEditControls( HWND hWnd )
+{
+	if ( g_edit_proxy == NULL )
+	{
+		return;
+	}
+
+	bool is_socks4 = ( g_edit_proxy->type == PROXY_TYPE_SOCKS4 );
+	bool is_socks5 = ( g_edit_proxy->type == PROXY_TYPE_SOCKS5 );
+
+	// The hostname and IP address controls overlap; show the one for the selected address
+	// type (EnableWindow alone has no effect on a hidden control).
+	_ShowWindow( GetDlgItem( hWnd, EDIT_HOSTNAME ), ( g_edit_proxy->address_type == 0 ? SW_SHOW : SW_HIDE ) );
+	_ShowWindow( GetDlgItem( hWnd, EDIT_IP_ADDRESS ), ( g_edit_proxy->address_type == 1 ? SW_SHOW : SW_HIDE ) );
+	_EnableWindow( GetDlgItem( hWnd, EDIT_HOSTNAME ), ( g_edit_proxy->address_type == 0 ? TRUE : FALSE ) );
+	_EnableWindow( GetDlgItem( hWnd, EDIT_IP_ADDRESS ), ( g_edit_proxy->address_type == 1 ? TRUE : FALSE ) );
+
+	// SOCKS4 has no authentication mechanism; its user ID is the ident username.
+	_EnableWindow( GetDlgItem( hWnd, BTN_USE_AUTH ), ( is_socks4 ? FALSE : TRUE ) );
+	_EnableWindow( GetDlgItem( hWnd, EDIT_USERNAME ), ( g_edit_proxy->use_authentication && !is_socks4 ? TRUE : FALSE ) );
+	_EnableWindow( GetDlgItem( hWnd, EDIT_PASSWORD ), ( g_edit_proxy->use_authentication && !is_socks4 ? TRUE : FALSE ) );
+
+	_EnableWindow( GetDlgItem( hWnd, BTN_RESOLVE_DOMAIN ), ( is_socks4 || is_socks5 ? TRUE : FALSE ) );
+	_EnableWindow( GetDlgItem( hWnd, EDIT_IDENT ), ( is_socks4 ? TRUE : FALSE ) );
+}
+
+bool ValidateProxyEditControls( HWND hWnd )
+{
+	wchar_t buf[ 512 ];
+
+	// Alias is required.
+	_SendMessageW( GetDlgItem( hWnd, EDIT_ALIAS ), WM_GETTEXT, 512, ( LPARAM )buf );
+	if ( buf[ 0 ] == 0 )
+	{
+		return false;
+	}
+
+	// Alias must be unique (case-insensitive). Skip the entry being edited.
+	unsigned char edit_selection = ( g_edit_new ? 0 : GetProxyListSelection() );
+	unsigned char idx = 0;
+	DoublyLinkedList *node = g_proxy_list;
+
+	while ( node != NULL )
+	{
+		++idx;
+		if ( !g_edit_new && idx == edit_selection )
+		{
+			node = node->next;
+			continue;
+		}
+
+		PROXY_ENTRY *pe = ( PROXY_ENTRY * )node->data;
+		if ( pe != NULL && pe->alias != NULL && lstrcmpiW( pe->alias, buf ) == 0 )
+		{
+			return false;
+		}
+
+		node = node->next;
+	}
+
+	bool is_hostname = ( _SendMessageW( GetDlgItem( hWnd, BTN_TYPE_HOST ), BM_GETCHECK, 0, 0 ) == BST_CHECKED ? true : false );
+
+	if ( is_hostname )
+	{
+		_SendMessageW( GetDlgItem( hWnd, EDIT_HOSTNAME ), WM_GETTEXT, 512, ( LPARAM )buf );
+		if ( buf[ 0 ] == 0 )
+		{
+			return false;
+		}
+	}
+	else if ( _SendMessageW( GetDlgItem( hWnd, EDIT_IP_ADDRESS ), IPM_ISBLANK, 0, 0 ) != FALSE )
+	{
+		return false;
+	}
+
+	_SendMessageW( GetDlgItem( hWnd, EDIT_PORT ), WM_GETTEXT, 6, ( LPARAM )buf );
+	unsigned long port = _wcstoul( buf, NULL, 10 );
+	if ( port == 0 || port > 65535 )
+	{
+		return false;
+	}
+
+	return true;
+}
+
+void FillProxyEditControls( HWND hWnd )
+{
+	if ( g_edit_proxy == NULL )
+	{
+		return;
+	}
+
+	_SendMessageW( GetDlgItem( hWnd, COMBO_PROXY_TYPE ), CB_SETCURSEL, g_edit_proxy->type, 0 );
+
+	_SendMessageW( GetDlgItem( hWnd, BTN_TYPE_HOST ), BM_SETCHECK, ( g_edit_proxy->address_type == 0 ? BST_CHECKED : BST_UNCHECKED ), 0 );
+	_SendMessageW( GetDlgItem( hWnd, BTN_TYPE_IP ), BM_SETCHECK, ( g_edit_proxy->address_type == 1 ? BST_CHECKED : BST_UNCHECKED ), 0 );
+
+	_SendMessageW( GetDlgItem( hWnd, EDIT_ALIAS ), WM_SETTEXT, 0, ( LPARAM )( g_edit_proxy->alias != NULL ? g_edit_proxy->alias : L"" ) );
+	_SendMessageW( GetDlgItem( hWnd, EDIT_HOSTNAME ), WM_SETTEXT, 0, ( LPARAM )( g_edit_proxy->hostname != NULL ? g_edit_proxy->hostname : L"" ) );
+
+	// ip_address is stored in IPM_GETADDRESS format, which is exactly what IPM_SETADDRESS expects.
+	_SendMessageW( GetDlgItem( hWnd, EDIT_IP_ADDRESS ), IPM_SETADDRESS, 0, g_edit_proxy->ip_address );
+
+	wchar_t port[ 6 ];
+	__snwprintf( port, 6, L"%hu", g_edit_proxy->port );
+	_SendMessageW( GetDlgItem( hWnd, EDIT_PORT ), WM_SETTEXT, 0, ( LPARAM )port );
+
+	_SendMessageW( GetDlgItem( hWnd, BTN_USE_AUTH ), BM_SETCHECK, ( g_edit_proxy->use_authentication ? BST_CHECKED : BST_UNCHECKED ), 0 );
+	_SendMessageW( GetDlgItem( hWnd, EDIT_USERNAME ), WM_SETTEXT, 0, ( LPARAM )( g_edit_proxy->username != NULL ? g_edit_proxy->username : L"" ) );
+	_SendMessageW( GetDlgItem( hWnd, EDIT_PASSWORD ), WM_SETTEXT, 0, ( LPARAM )( g_edit_proxy->password != NULL ? g_edit_proxy->password : L"" ) );
+
+	_SendMessageW( GetDlgItem( hWnd, BTN_RESOLVE_DOMAIN ), BM_SETCHECK, ( g_edit_proxy->resolve_domain_names ? BST_CHECKED : BST_UNCHECKED ), 0 );
+	_SendMessageW( GetDlgItem( hWnd, EDIT_IDENT ), WM_SETTEXT, 0, ( LPARAM )( g_edit_proxy->ident_username != NULL ? g_edit_proxy->ident_username : L"" ) );
+
+	UpdateProxyEditControls( hWnd );
+
+	_EnableWindow( GetDlgItem( hWnd, EDIT_DLG_SAVE ), ( ValidateProxyEditControls( hWnd ) ? TRUE : FALSE ) );
+}
+
+void UpdateSaveButtonState( HWND hWnd )
+{
+	_EnableWindow( GetDlgItem( hWnd, EDIT_DLG_SAVE ), ( ValidateProxyEditControls( hWnd ) ? TRUE : FALSE ) );
+}
+
+bool ReadProxyEditControls( HWND hWnd, PROXY_ENTRY **pe_out )
+{
+	if ( g_edit_proxy == NULL )
+	{
+		return false;
+	}
+
+	int type = ( int )_SendMessageW( GetDlgItem( hWnd, COMBO_PROXY_TYPE ), CB_GETCURSEL, 0, 0 );
+	if ( type < 0 )
+	{
+		return false;
+	}
+
+	wchar_t buf[ 512 ];
+
+	_SendMessageW( GetDlgItem( hWnd, EDIT_HOSTNAME ), WM_GETTEXT, 512, ( LPARAM )buf );
+
+	// A hostname or an IP address must be set.
+	bool is_hostname = ( _SendMessageW( GetDlgItem( hWnd, BTN_TYPE_HOST ), BM_GETCHECK, 0, 0 ) == BST_CHECKED ? true : false );
+	if ( ( is_hostname && buf[ 0 ] == 0 ) ||
+		 ( !is_hostname && _SendMessageW( GetDlgItem( hWnd, EDIT_IP_ADDRESS ), IPM_ISBLANK, 0, 0 ) != FALSE ) )
+	{
+		return false;
+	}
+
+	// Duplicate the hostname NOW: buf is reused for the port/credentials below.
+	wchar_t *hostname = ( is_hostname && buf[ 0 ] != 0 ? GlobalStrDupW( buf ) : NULL );
+
+	unsigned long ip_address = 0;
+	if ( !is_hostname )
+	{
+		_SendMessageW( GetDlgItem( hWnd, EDIT_IP_ADDRESS ), IPM_GETADDRESS, 0, ( LPARAM )&ip_address );
+	}
+
+	_SendMessageW( GetDlgItem( hWnd, EDIT_PORT ), WM_GETTEXT, 6, ( LPARAM )buf );
+	unsigned long port = _wcstoul( buf, NULL, 10 );
+	if ( port == 0 || port > 65535 )
+	{
+		return false;
+	}
+
+	bool use_authentication = ( _SendMessageW( GetDlgItem( hWnd, BTN_USE_AUTH ), BM_GETCHECK, 0, 0 ) == BST_CHECKED ? true : false );
+
+	// SOCKS4 has no authentication mechanism.
+	if ( type == PROXY_TYPE_SOCKS4 )
+	{
+		use_authentication = false;
+	}
+
+	wchar_t alias[ 512 ];
+	_SendMessageW( GetDlgItem( hWnd, EDIT_ALIAS ), WM_GETTEXT, 512, ( LPARAM )alias );
+	if ( alias[ 0 ] == 0 )
+	{
+		return false;	// Alias is required.
+	}
+
+	// Reuse buf to keep the stack frame small (large frames would pull in __chkstk,
+	// which is unavailable in the no-CRT Release build).
+	_SendMessageW( GetDlgItem( hWnd, EDIT_USERNAME ), WM_GETTEXT, 512, ( LPARAM )buf );
+	wchar_t *username = ( buf[ 0 ] != 0 ? GlobalStrDupW( buf ) : NULL );
+
+	_SendMessageW( GetDlgItem( hWnd, EDIT_PASSWORD ), WM_GETTEXT, 512, ( LPARAM )buf );
+	wchar_t *password = ( buf[ 0 ] != 0 ? GlobalStrDupW( buf ) : NULL );
+
+	bool resolve_domain_names = ( _SendMessageW( GetDlgItem( hWnd, BTN_RESOLVE_DOMAIN ), BM_GETCHECK, 0, 0 ) == BST_CHECKED ? true : false );
+
+	// The ident user ID is only meaningful for SOCKS4.
+	_SendMessageW( GetDlgItem( hWnd, EDIT_IDENT ), WM_GETTEXT, 512, ( LPARAM )buf );
+	wchar_t *ident_username = ( type == PROXY_TYPE_SOCKS4 && buf[ 0 ] != 0 ? GlobalStrDupW( buf ) : NULL );
+
+	// Update the working copy.
+	GlobalFree( g_edit_proxy->alias );
+	GlobalFree( g_edit_proxy->hostname );
+	GlobalFree( g_edit_proxy->username );
+	GlobalFree( g_edit_proxy->password );
+	GlobalFree( g_edit_proxy->ident_username );
+	GlobalFree( g_edit_proxy->punycode_hostname );
+	GlobalFree( g_edit_proxy->auth_username_utf8 );
+	GlobalFree( g_edit_proxy->auth_password_utf8 );
+	GlobalFree( g_edit_proxy->ident_username_utf8 );
+	GlobalFree( g_edit_proxy->auth_key );
+
+	_memzero( g_edit_proxy, sizeof( PROXY_ENTRY ) );
+
+	g_edit_proxy->alias = ( alias[ 0 ] != 0 ? GlobalStrDupW( alias ) : NULL );
+	g_edit_proxy->type = ( unsigned char )type;
+	g_edit_proxy->address_type = ( is_hostname ? 0 : 1 );
+	g_edit_proxy->ip_address = ip_address;
+	g_edit_proxy->hostname = hostname;
+	g_edit_proxy->port = ( unsigned short )port;
+	g_edit_proxy->use_authentication = use_authentication;
+	g_edit_proxy->username = username;
+	g_edit_proxy->password = password;
+	g_edit_proxy->resolve_domain_names = resolve_domain_names;
+	g_edit_proxy->ident_username = ident_username;
+
+	*pe_out = g_edit_proxy;
+	g_edit_proxy = NULL;	// Ownership transferred.
+
+	return true;
+}
+
+void OpenProxyEditDialog( bool new_entry, unsigned char edit_index )
+{
+	if ( g_hWnd_proxy_edit != NULL )
+	{
+		_SetForegroundWindow( g_hWnd_proxy_edit );
+		return;
+	}
+
+	// Build the working copy.
+	if ( new_entry )
+	{
+		g_edit_proxy = ( PROXY_ENTRY * )GlobalAlloc( GPTR, sizeof( PROXY_ENTRY ) );
+		if ( g_edit_proxy != NULL )
+		{
+			g_edit_proxy->type = PROXY_TYPE_HTTP;
+			g_edit_proxy->address_type = 0;
+			g_edit_proxy->ip_address = 0x7F000001;	// 127.0.0.1 (IPM_GETADDRESS format).
+			g_edit_proxy->hostname = GlobalStrDupW( L"localhost" );
+			g_edit_proxy->port = 8080;
+		}
+		g_edit_new = true;
+	}
+	else if ( edit_index > 0 )
+	{
+		DoublyLinkedList *node = g_proxy_list;
+		for ( unsigned char i = 1; i < edit_index && node != NULL; ++i )
+		{
+			node = node->next;
+		}
+
+		if ( node != NULL )
+		{
+			PROXY_ENTRY *src = ( PROXY_ENTRY * )node->data;
+			g_edit_proxy = ( PROXY_ENTRY * )GlobalAlloc( GPTR, sizeof( PROXY_ENTRY ) );
+
+			if ( g_edit_proxy != NULL )
+			{
+				g_edit_proxy->alias = ( src->alias != NULL ? GlobalStrDupW( src->alias ) : NULL );
+				g_edit_proxy->type = src->type;
+				g_edit_proxy->address_type = src->address_type;
+				g_edit_proxy->ip_address = src->ip_address;
+				g_edit_proxy->hostname = ( src->hostname != NULL ? GlobalStrDupW( src->hostname ) : NULL );
+				g_edit_proxy->port = src->port;
+				g_edit_proxy->use_authentication = src->use_authentication;
+				g_edit_proxy->username = ( src->username != NULL ? GlobalStrDupW( src->username ) : NULL );
+				g_edit_proxy->password = ( src->password != NULL ? GlobalStrDupW( src->password ) : NULL );
+				g_edit_proxy->resolve_domain_names = src->resolve_domain_names;
+				g_edit_proxy->ident_username = ( src->ident_username != NULL ? GlobalStrDupW( src->ident_username ) : NULL );
+			}
+		}
+		g_edit_new = false;
+	}
+
+	if ( g_edit_proxy == NULL )
+	{
+		return;
+	}
+
+	// Center the window over the options window. Compute the position BEFORE creating the
+	// window so it's born on the same monitor as the options window (creating at 0,0 and
+	// then moving can bounce the window across monitors and trigger DPI change churn).
+	int width = _SCALE_O_( 380 );
+	int height = _SCALE_O_( 430 );
+
+	RECT rc_options; _GetWindowRect( g_hWnd_options, &rc_options );
+	int options_width = rc_options.right - rc_options.left;
+	int options_height = rc_options.bottom - rc_options.top;
+
+	int pos_x = rc_options.left + ( ( options_width - width ) / 2 );
+	int pos_y = rc_options.top + ( ( options_height - height ) / 2 );
+
+	// Independent font instance for this dialog (see g_hFont_proxy_edit comment).
+	// Create it BEFORE the window so WM_CREATE can assign it to the controls.
+	if ( g_hFont_proxy_edit == NULL )
+	{
+		g_hFont_proxy_edit = UpdateFont( current_dpi_options );
+	}
+
+	g_hWnd_proxy_edit = _CreateWindowExW( 0, L"class_proxy_edit", ( new_entry ? L"Add Proxy" : L"Edit Proxy" ), WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, pos_x, pos_y, width, height, g_hWnd_options, NULL, NULL, NULL );
+	if ( g_hWnd_proxy_edit == NULL )
+	{
+		FreeProxyEntry( g_edit_proxy );
+		g_edit_proxy = NULL;
+	}
+	else
+	{
+		// An owned window always stays above its owner, which gives the modal behavior
+		// we want. We deliberately do NOT disable the options window here: the
+		// disable/enable cycle made the options window redraw its text without ClearType
+		// (bold/black text) after the dialog was closed.
+	}
+}
+
+LRESULT CALLBACK ProxyEditWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam )
+{
+	switch ( msg )
+	{
+		case WM_CREATE:
+		{
+			// The window is positioned at creation time (OpenProxyEditDialog), so no
+			// repositioning is needed here.
+
+			HWND hWnd_combo_type = _CreateWindowW( WC_COMBOBOX, NULL, CBS_DROPDOWNLIST | WS_CHILD | WS_TABSTOP | WS_VISIBLE, _SCALE_O_( 10 ), _SCALE_O_( 40 ), _SCALE_O_( 345 ), _SCALE_O_( 100 ), hWnd, ( HMENU )COMBO_PROXY_TYPE, NULL, NULL );
+			_SendMessageW( hWnd_combo_type, CB_ADDSTRING, 0, ( LPARAM )L"HTTP" );
+			_SendMessageW( hWnd_combo_type, CB_ADDSTRING, 0, ( LPARAM )L"HTTPS" );
+			_SendMessageW( hWnd_combo_type, CB_ADDSTRING, 0, ( LPARAM )L"SOCKS v4" );
+			_SendMessageW( hWnd_combo_type, CB_ADDSTRING, 0, ( LPARAM )L"SOCKS v5" );
+
+			_CreateWindowW( WC_STATIC, L"Alias:", WS_CHILD | WS_VISIBLE, _SCALE_O_( 10 ), _SCALE_O_( 13 ), _SCALE_O_( 40 ), _SCALE_O_( 17 ), hWnd, NULL, NULL, NULL );
+			_CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_AUTOHSCROLL | WS_CHILD | WS_TABSTOP | WS_VISIBLE, _SCALE_O_( 55 ), _SCALE_O_( 10 ), _SCALE_O_( 300 ), _SCALE_O_( 23 ), hWnd, ( HMENU )EDIT_ALIAS, NULL, NULL );
+
+			_CreateWindowW( WC_BUTTON, L"Hostname", BS_AUTORADIOBUTTON | WS_CHILD | WS_GROUP | WS_TABSTOP | WS_VISIBLE, _SCALE_O_( 10 ), _SCALE_O_( 70 ), _SCALE_O_( 110 ), _SCALE_O_( 20 ), hWnd, ( HMENU )BTN_TYPE_HOST, NULL, NULL );
+			_CreateWindowW( WC_BUTTON, L"IPv4 address", BS_AUTORADIOBUTTON | WS_CHILD | WS_TABSTOP | WS_VISIBLE, _SCALE_O_( 130 ), _SCALE_O_( 70 ), _SCALE_O_( 110 ), _SCALE_O_( 20 ), hWnd, ( HMENU )BTN_TYPE_IP, NULL, NULL );
+
+			_CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_AUTOHSCROLL | WS_CHILD | WS_TABSTOP | WS_VISIBLE, _SCALE_O_( 10 ), _SCALE_O_( 95 ), _SCALE_O_( 345 ), _SCALE_O_( 23 ), hWnd, ( HMENU )EDIT_HOSTNAME, NULL, NULL );
+			_SendMessageW( GetDlgItem( hWnd, EDIT_HOSTNAME ), EM_LIMITTEXT, MAX_DOMAIN_LENGTH, 0 );
+
+			_CreateWindowExW( WS_EX_CLIENTEDGE, WC_IPADDRESS, NULL, WS_CHILD | WS_TABSTOP, _SCALE_O_( 10 ), _SCALE_O_( 95 ), _SCALE_O_( 345 ), _SCALE_O_( 23 ), hWnd, ( HMENU )EDIT_IP_ADDRESS, NULL, NULL );
+
+			_CreateWindowW( WC_STATIC, L"Port:", WS_CHILD | WS_VISIBLE, _SCALE_O_( 10 ), _SCALE_O_( 128 ), _SCALE_O_( 40 ), _SCALE_O_( 17 ), hWnd, NULL, NULL, NULL );
+			_CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_AUTOHSCROLL | ES_CENTER | ES_NUMBER | WS_CHILD | WS_TABSTOP | WS_VISIBLE, _SCALE_O_( 55 ), _SCALE_O_( 125 ), _SCALE_O_( 80 ), _SCALE_O_( 23 ), hWnd, ( HMENU )EDIT_PORT, NULL, NULL );
+			_SendMessageW( GetDlgItem( hWnd, EDIT_PORT ), EM_LIMITTEXT, 5, 0 );
+
+			_CreateWindowW( WC_BUTTON, L"Use authentication", BS_AUTOCHECKBOX | WS_CHILD | WS_TABSTOP | WS_VISIBLE, _SCALE_O_( 10 ), _SCALE_O_( 160 ), _SCALE_O_( 170 ), _SCALE_O_( 20 ), hWnd, ( HMENU )BTN_USE_AUTH, NULL, NULL );
+
+			_CreateWindowW( WC_STATIC, L"Username:", WS_CHILD | WS_VISIBLE, _SCALE_O_( 10 ), _SCALE_O_( 188 ), _SCALE_O_( 70 ), _SCALE_O_( 17 ), hWnd, NULL, NULL, NULL );
+			_CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_AUTOHSCROLL | WS_CHILD | WS_TABSTOP | WS_VISIBLE, _SCALE_O_( 85 ), _SCALE_O_( 185 ), _SCALE_O_( 270 ), _SCALE_O_( 23 ), hWnd, ( HMENU )EDIT_USERNAME, NULL, NULL );
+
+			_CreateWindowW( WC_STATIC, L"Password:", WS_CHILD | WS_VISIBLE, _SCALE_O_( 10 ), _SCALE_O_( 218 ), _SCALE_O_( 70 ), _SCALE_O_( 17 ), hWnd, NULL, NULL, NULL );
+			_CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_PASSWORD | ES_AUTOHSCROLL | WS_CHILD | WS_TABSTOP | WS_VISIBLE, _SCALE_O_( 85 ), _SCALE_O_( 215 ), _SCALE_O_( 270 ), _SCALE_O_( 23 ), hWnd, ( HMENU )EDIT_PASSWORD, NULL, NULL );
+
+			_CreateWindowW( WC_BUTTON, L"Resolve domain names", BS_AUTOCHECKBOX | WS_CHILD | WS_TABSTOP | WS_VISIBLE, _SCALE_O_( 10 ), _SCALE_O_( 248 ), _SCALE_O_( 180 ), _SCALE_O_( 20 ), hWnd, ( HMENU )BTN_RESOLVE_DOMAIN, NULL, NULL );
+
+			_CreateWindowW( WC_STATIC, L"Ident username:", WS_CHILD | WS_VISIBLE, _SCALE_O_( 10 ), _SCALE_O_( 276 ), _SCALE_O_( 110 ), _SCALE_O_( 17 ), hWnd, NULL, NULL, NULL );
+			_CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_AUTOHSCROLL | WS_CHILD | WS_TABSTOP | WS_VISIBLE, _SCALE_O_( 125 ), _SCALE_O_( 273 ), _SCALE_O_( 230 ), _SCALE_O_( 23 ), hWnd, ( HMENU )EDIT_IDENT, NULL, NULL );
+
+			_CreateWindowW( WC_BUTTON, ST_V_Save, BS_PUSHBUTTON | WS_CHILD | WS_TABSTOP | WS_VISIBLE, _SCALE_O_( 190 ), _SCALE_O_( 330 ), _SCALE_O_( 80 ), _SCALE_O_( 23 ), hWnd, ( HMENU )EDIT_DLG_SAVE, NULL, NULL );
+			_CreateWindowW( WC_BUTTON, ST_V_Cancel, BS_PUSHBUTTON | WS_CHILD | WS_TABSTOP | WS_VISIBLE, _SCALE_O_( 275 ), _SCALE_O_( 330 ), _SCALE_O_( 80 ), _SCALE_O_( 23 ), hWnd, ( HMENU )EDIT_DLG_CANCEL, NULL, NULL );
+
+			if ( g_hFont_proxy_edit != NULL )
+			{
+				HWND hWnd_child = _GetWindow( hWnd, GW_CHILD );
+				while ( hWnd_child != NULL )
+				{
+					_SendMessageW( hWnd_child, WM_SETFONT, ( WPARAM )g_hFont_proxy_edit, TRUE );
+
+					// Some composite controls (IP address, combo box) ignore WM_SETFONT on
+					// themselves; their inner child controls need the font individually.
+					EnumChildWindows( hWnd_child, EnumChildFontProc, ( LPARAM )g_hFont_proxy_edit );
+
+					hWnd_child = _GetWindow( hWnd_child, GW_HWNDNEXT );
+				}
+			}
+
+			FillProxyEditControls( hWnd );
+
+			_ShowWindow( hWnd, SW_SHOWNORMAL );
+
+			return 0;
+		}
+		break;
+
+		case WM_COMMAND:
+		{
+			switch ( LOWORD( wParam ) )
+			{
+				case COMBO_PROXY_TYPE:
+				{
+					if ( HIWORD( wParam ) == CBN_SELCHANGE && g_edit_proxy != NULL )
+					{
+						int type = ( int )_SendMessageW( GetDlgItem( hWnd, COMBO_PROXY_TYPE ), CB_GETCURSEL, 0, 0 );
+						if ( type >= 0 )
+						{
+							g_edit_proxy->type = ( unsigned char )type;
+							UpdateProxyEditControls( hWnd );
+							UpdateSaveButtonState( hWnd );
+						}
+					}
+				}
+				break;
+
+				case BTN_TYPE_HOST:
+				case BTN_TYPE_IP:
+				{
+					if ( g_edit_proxy != NULL )
+					{
+						g_edit_proxy->address_type = ( LOWORD( wParam ) == BTN_TYPE_HOST ? 0 : 1 );
+						UpdateProxyEditControls( hWnd );
+						UpdateSaveButtonState( hWnd );
+					}
+				}
+				break;
+
+				case BTN_USE_AUTH:
+				{
+					if ( g_edit_proxy != NULL )
+					{
+						g_edit_proxy->use_authentication = ( _SendMessageW( GetDlgItem( hWnd, BTN_USE_AUTH ), BM_GETCHECK, 0, 0 ) == BST_CHECKED ? true : false );
+						UpdateProxyEditControls( hWnd );
+					}
+				}
+				break;
+
+				case EDIT_ALIAS:
+				case EDIT_HOSTNAME:
+				case EDIT_PORT:
+				{
+					if ( HIWORD( wParam ) == EN_CHANGE )
+					{
+						UpdateSaveButtonState( hWnd );
+					}
+				}
+				break;
+
+				case EDIT_DLG_SAVE:
+				{
+					PROXY_ENTRY *pe = NULL;
+					if ( ReadProxyEditControls( hWnd, &pe ) && pe != NULL )
+					{
+						// New entry: append to the list. Existing entry: replace in place.
+						if ( g_edit_new )
+						{
+							DoublyLinkedList *node = DLL_CreateNode( pe );
+							if ( node != NULL )
+							{
+								DLL_AddNode( &g_proxy_list, node, -1 );
+							}
+							else
+							{
+								FreeProxyEntry( pe );
+							}
+						}
+						else
+						{
+							// The edit dialog was opened with a copy; find the original by
+							// position. The list hasn't changed while the dialog was open.
+							DoublyLinkedList *node = g_proxy_list;
+							for ( unsigned char i = 1; i < GetProxyListSelection() && node != NULL; ++i )
+							{
+								node = node->next;
+							}
+
+							if ( node != NULL )
+							{
+								FreeProxyEntry( ( PROXY_ENTRY * )node->data );
+								node->data = pe;
+							}
+							else
+							{
+								FreeProxyEntry( pe );
+							}
+						}
+
+						// If the edited entry was the active one, refresh its runtime fields.
+						if ( cfg_selected_proxy > 0 && cfg_selected_proxy == GetProxyListSelection() )
+						{
+							ApplyProxySelection( cfg_selected_proxy );
+						}
+						else
+						{
+							SaveProxyList();
+						}
+
+						RefreshProxyList();
+						RefreshProxyCombo();
+
+						_SendMessageW( hWnd, WM_CLOSE, 0, 0 );
+					}
+				}
+				break;
+
+				case EDIT_DLG_CANCEL:
+				{
+					_SendMessageW( hWnd, WM_CLOSE, 0, 0 );
+				}
+				break;
+			}
+
+			return 0;
+		}
+		break;
+
+		case WM_NOTIFY:
+		{
+			// IP address field changed.
+			if ( ( ( LPNMHDR )lParam )->code == IPN_FIELDCHANGED &&
+				 ( ( LPNMHDR )lParam )->idFrom == EDIT_IP_ADDRESS )
+			{
+				UpdateSaveButtonState( hWnd );
+			}
+
+			return 0;
+		}
+		break;
+
+		case WM_CLOSE:
+		{
+			// NOTE: Do NOT force a full invalidate of the options window here. Doing so made
+			// every control in the options window repaint without ClearType (bold/black text).
+			_DestroyWindow( hWnd );
+
+			return 0;
+		}
+		break;
+
+		case WM_DESTROY:
+		{
+			if ( g_edit_proxy != NULL )
+			{
+				FreeProxyEntry( g_edit_proxy );
+				g_edit_proxy = NULL;
+			}
+
+			// Release this dialog's own font (the controls are gone by now).
+			if ( g_hFont_proxy_edit != NULL )
+			{
+				_DeleteObject( g_hFont_proxy_edit );
+				g_hFont_proxy_edit = NULL;
+			}
+
+			g_hWnd_proxy_edit = NULL;
+
+			return _DefWindowProcW( hWnd, msg, wParam, lParam );
+		}
+		break;
+
+		default:
+		{
+			return _DefWindowProcW( hWnd, msg, wParam, lParam );
+		}
+		break;
+	}
+
+	return TRUE;
+}
 
 LRESULT CALLBACK ProxyTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam )
 {
-	 switch ( msg )
-    {
+	switch ( msg )
+	{
 		case WM_CREATE:
 		{
 			RECT rc;
 			_GetClientRect( hWnd, &rc );
 
-			//
+			g_hWnd_proxy_list = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_LISTVIEWW, NULL, LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 10, 10, rc.right - 20, rc.bottom - 85, hWnd, ( HMENU )LIST_PROXY, NULL, NULL );
+			_SendMessageW( g_hWnd_proxy_list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER );
 
-			g_hWnd_chk_proxy = _CreateWindowW( WC_BUTTON, ST_V_Use_HTTP_proxy_, BS_AUTOCHECKBOX | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )BTN_PROXY, NULL, NULL );
+			LVCOLUMNW lvc;
+			_memzero( &lvc, sizeof( LVCOLUMNW ) );
+			lvc.mask = LVCF_TEXT | LVCF_WIDTH;
 
+			lvc.pszText = L"Protocol";
+			lvc.cx = 80;
+			_SendMessageW( g_hWnd_proxy_list, LVM_INSERTCOLUMNW, 0, ( LPARAM )&lvc );
 
-			g_hWnd_chk_type_hostname = _CreateWindowW( WC_BUTTON, ST_V_Hostname___IPv6_address_, BS_AUTORADIOBUTTON | WS_CHILD | WS_GROUP | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )BTN_TYPE_HOST, NULL, NULL );
-			g_hWnd_chk_type_ip_address = _CreateWindowW( WC_BUTTON, ST_V_IPv4_address_, BS_AUTORADIOBUTTON | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )BTN_TYPE_IP_ADDRESS, NULL, NULL );
+			lvc.pszText = L"Address/Hostname";
+			lvc.cx = 260;
+			_SendMessageW( g_hWnd_proxy_list, LVM_INSERTCOLUMNW, 1, ( LPARAM )&lvc );
 
-			g_hWnd_hostname = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_AUTOHSCROLL | ES_CENTER | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )EDIT_HOST, NULL, NULL );
-			// Needs a width and height when it's created because it's a stupid control.
-			g_hWnd_ip_address = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_IPADDRESS, NULL, WS_CHILD | WS_TABSTOP, 0, 0, 310, 23, hWnd, ( HMENU )EDIT_IP_ADDRESS, NULL, NULL );
+			lvc.pszText = L"Port";
+			lvc.cx = 60;
+			_SendMessageW( g_hWnd_proxy_list, LVM_INSERTCOLUMNW, 2, ( LPARAM )&lvc );
 
+			lvc.pszText = L"Authentication";
+			lvc.cx = 100;
+			_SendMessageW( g_hWnd_proxy_list, LVM_INSERTCOLUMNW, 3, ( LPARAM )&lvc );
 
-			g_hWnd_static_colon = _CreateWindowW( WC_STATIC, ST_V_COLON, SS_CENTER | WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
+			g_hWnd_btn_proxy_add = _CreateWindowW( WC_BUTTON, L"Add", BS_PUSHBUTTON | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 10, rc.bottom - 65, 80, 23, hWnd, ( HMENU )BTN_PROXY_ADD, NULL, NULL );
+			g_hWnd_btn_proxy_edit = _CreateWindowW( WC_BUTTON, L"Edit", BS_PUSHBUTTON | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 95, rc.bottom - 65, 80, 23, hWnd, ( HMENU )BTN_PROXY_EDIT, NULL, NULL );
+			g_hWnd_btn_proxy_remove = _CreateWindowW( WC_BUTTON, L"Remove", BS_PUSHBUTTON | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 180, rc.bottom - 65, 80, 23, hWnd, ( HMENU )BTN_PROXY_REMOVE, NULL, NULL );
 
-			g_hWnd_static_port = _CreateWindowW( WC_STATIC, ST_V_Port_, WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
-			g_hWnd_port = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_AUTOHSCROLL | ES_CENTER | ES_NUMBER | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )EDIT_PORT, NULL, NULL );
+			g_hWnd_static_proxy_select = _CreateWindowW( WC_STATIC, L"Use proxy:", WS_CHILD | WS_VISIBLE, 10, rc.bottom - 32, 60, 17, hWnd, ( HMENU )STATIC_PROXY_SELECT, NULL, NULL );
+			g_hWnd_combo_proxy_select = _CreateWindowW( WC_COMBOBOX, NULL, CBS_DROPDOWNLIST | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 80, rc.bottom - 35, rc.right - 90, 200, hWnd, ( HMENU )COMBO_PROXY_SELECT, NULL, NULL );
 
-
-			g_hWnd_static_auth_username = _CreateWindowW( WC_STATIC, ST_V_Username_, WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
-			g_hWnd_auth_username = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_AUTOHSCROLL | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )( HMENU )EDIT_AUTH_USERNAME, NULL, NULL );
-
-			g_hWnd_static_auth_password = _CreateWindowW( WC_STATIC, ST_V_Password_, WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
-			g_hWnd_auth_password = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_PASSWORD | ES_AUTOHSCROLL | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )( HMENU )EDIT_AUTH_PASSWORD, NULL, NULL );
-
-
-			_SendMessageW( g_hWnd_hostname, EM_LIMITTEXT, MAX_DOMAIN_LENGTH, 0 );
-			_SendMessageW( g_hWnd_port, EM_LIMITTEXT, 5, 0 );
-
-
-			//
-
-			g_hWnd_static_proxy_hoz1 = _CreateWindowW( WC_STATIC, NULL, SS_ETCHEDHORZ | WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
-
-			//
-
-			g_hWnd_chk_proxy_s = _CreateWindowW( WC_BUTTON, ST_V_Use_HTTPS_proxy_, BS_AUTOCHECKBOX | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )BTN_PROXY_S, NULL, NULL );
-
-
-			g_hWnd_chk_type_hostname_s = _CreateWindowW( WC_BUTTON, ST_V_Hostname___IPv6_address_, BS_AUTORADIOBUTTON | WS_CHILD | WS_GROUP | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )BTN_TYPE_HOST_S, NULL, NULL );
-			g_hWnd_chk_type_ip_address_s = _CreateWindowW( WC_BUTTON, ST_V_IPv4_address_, BS_AUTORADIOBUTTON | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )BTN_TYPE_IP_ADDRESS_S, NULL, NULL );
-
-			g_hWnd_hostname_s = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_AUTOHSCROLL | ES_CENTER | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )EDIT_HOST_S, NULL, NULL );
-			// Needs a width and height when it's created because it's a stupid control.
-			g_hWnd_ip_address_s = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_IPADDRESS, NULL, WS_CHILD | WS_TABSTOP, 0, 0, 310, 23, hWnd, ( HMENU )EDIT_IP_ADDRESS_S, NULL, NULL );
-
-
-			g_hWnd_static_colon_s = _CreateWindowW( WC_STATIC, ST_V_COLON, SS_CENTER | WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
-
-			g_hWnd_static_port_s = _CreateWindowW( WC_STATIC, ST_V_Port_, WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
-			g_hWnd_port_s = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_AUTOHSCROLL | ES_CENTER | ES_NUMBER | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )EDIT_PORT_S, NULL, NULL );
-
-
-			g_hWnd_static_auth_username_s = _CreateWindowW( WC_STATIC, ST_V_Username_, WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
-			g_hWnd_auth_username_s = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_AUTOHSCROLL | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )( HMENU )EDIT_AUTH_USERNAME_S, NULL, NULL );
-
-			g_hWnd_static_auth_password_s = _CreateWindowW( WC_STATIC, ST_V_Password_, WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
-			g_hWnd_auth_password_s = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_PASSWORD | ES_AUTOHSCROLL | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )( HMENU )EDIT_AUTH_PASSWORD_S, NULL, NULL );
-
-
-			_SendMessageW( g_hWnd_hostname_s, EM_LIMITTEXT, MAX_DOMAIN_LENGTH, 0 );
-			_SendMessageW( g_hWnd_port_s, EM_LIMITTEXT, 5, 0 );
-
-
-			//
-
-
-			g_hWnd_static_proxy_hoz2 = _CreateWindowW( WC_STATIC, NULL, SS_ETCHEDHORZ | WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
-
-			//
-
-			g_hWnd_chk_proxy_socks = _CreateWindowW( WC_BUTTON, ST_V_Use_SOCKS_proxy_, BS_AUTOCHECKBOX | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )BTN_PROXY_SOCKS, NULL, NULL );
-
-			g_hWnd_chk_type_socks4 = _CreateWindowW( WC_BUTTON, ST_V_SOCKS_v4, BS_AUTORADIOBUTTON | WS_CHILD | WS_GROUP | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )BTN_TYPE_SOCKS4, NULL, NULL );
-			g_hWnd_chk_type_socks5 = _CreateWindowW( WC_BUTTON, ST_V_SOCKS_v5, BS_AUTORADIOBUTTON | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )BTN_TYPE_SOCKS5, NULL, NULL );
-
-			g_hWnd_chk_type_hostname_socks = _CreateWindowW( WC_BUTTON, ST_V_Hostname___IPv6_address_, BS_AUTORADIOBUTTON | WS_CHILD | WS_GROUP | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )BTN_TYPE_HOST_SOCKS, NULL, NULL );
-			g_hWnd_chk_type_ip_address_socks = _CreateWindowW( WC_BUTTON, ST_V_IPv4_address_, BS_AUTORADIOBUTTON | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )BTN_TYPE_IP_ADDRESS_SOCKS, NULL, NULL );
-
-			g_hWnd_hostname_socks = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_AUTOHSCROLL | ES_CENTER | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )EDIT_HOST_SOCKS, NULL, NULL );
-			// Needs a width and height when it's created because it's a stupid control.
-			g_hWnd_ip_address_socks = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_IPADDRESS, NULL, WS_CHILD | WS_TABSTOP, 0, 0, 310, 23, hWnd, ( HMENU )EDIT_IP_ADDRESS_SOCKS, NULL, NULL );
-
-
-			g_hWnd_static_colon_socks = _CreateWindowW( WC_STATIC, ST_V_COLON, SS_CENTER | WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
-
-			g_hWnd_static_port_socks = _CreateWindowW( WC_STATIC, ST_V_Port_, WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
-			g_hWnd_port_socks = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_AUTOHSCROLL | ES_CENTER | ES_NUMBER | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )EDIT_PORT_SOCKS, NULL, NULL );
-
-
-			g_hWnd_static_auth_ident_username_socks = _CreateWindowW( WC_STATIC, ST_V_Username_, WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
-			g_hWnd_auth_ident_username_socks = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_AUTOHSCROLL | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )( HMENU )EDIT_AUTH_IDENT_USERNAME_SOCKS, NULL, NULL );
-
-			g_hWnd_chk_resolve_domain_names_v4a = _CreateWindowW( WC_BUTTON, ST_V_Allow_proxy_to_resolve_domain_names_v4a, BS_AUTOCHECKBOX | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )BTN_RESOLVE_DOMAIN_NAMES_V4A, NULL, NULL );
-
-			g_hWnd_chk_use_authentication_socks = _CreateWindowW( WC_BUTTON, ST_V_Use_Authentication_, BS_AUTOCHECKBOX | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )BTN_AUTHENTICATION_SOCKS, NULL, NULL );
-
-			g_hWnd_static_auth_username_socks = _CreateWindowW( WC_STATIC, ST_V_Username_, WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
-			g_hWnd_auth_username_socks = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_AUTOHSCROLL | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )( HMENU )EDIT_AUTH_USERNAME_SOCKS, NULL, NULL );
-
-			g_hWnd_static_auth_password_socks = _CreateWindowW( WC_STATIC, ST_V_Password_, WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
-			g_hWnd_auth_password_socks = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_PASSWORD | ES_AUTOHSCROLL | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )( HMENU )EDIT_AUTH_PASSWORD_SOCKS, NULL, NULL );
-
-			g_hWnd_chk_resolve_domain_names = _CreateWindowW( WC_BUTTON, ST_V_Allow_proxy_to_resolve_domain_names, BS_AUTOCHECKBOX | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 0, 0, 0, hWnd, ( HMENU )BTN_RESOLVE_DOMAIN_NAMES, NULL, NULL );
-
-			_SendMessageW( g_hWnd_hostname_socks, EM_LIMITTEXT, MAX_DOMAIN_LENGTH, 0 );
-			_SendMessageW( g_hWnd_port_socks, EM_LIMITTEXT, 5, 0 );
-
-			_SendMessageW( g_hWnd_auth_username_socks, EM_LIMITTEXT, 255, 0 );
-			_SendMessageW( g_hWnd_auth_password_socks, EM_LIMITTEXT, 255, 0 );
-
-
-			_SendMessageW( g_hWnd_chk_proxy, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_chk_type_hostname, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-			_SendMessageW( g_hWnd_chk_type_ip_address, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_hostname, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_static_colon, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_static_port, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-			_SendMessageW( g_hWnd_port, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_static_auth_username, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-			_SendMessageW( g_hWnd_auth_username, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_static_auth_password, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-			_SendMessageW( g_hWnd_auth_password, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			//
-
-			_SendMessageW( g_hWnd_chk_proxy_s, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_chk_type_hostname_s, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-			_SendMessageW( g_hWnd_chk_type_ip_address_s, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_hostname_s, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_static_colon_s, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_static_port_s, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-			_SendMessageW( g_hWnd_port_s, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_static_auth_username_s, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-			_SendMessageW( g_hWnd_auth_username_s, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_static_auth_password_s, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-			_SendMessageW( g_hWnd_auth_password_s, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			//
-
-			_SendMessageW( g_hWnd_chk_proxy_socks, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_chk_type_socks4, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-			_SendMessageW( g_hWnd_chk_type_socks5, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_chk_type_hostname_socks, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-			_SendMessageW( g_hWnd_chk_type_ip_address_socks, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_hostname_socks, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_static_colon_socks, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_static_port_socks, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-			_SendMessageW( g_hWnd_port_socks, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_static_auth_ident_username_socks, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-			_SendMessageW( g_hWnd_auth_ident_username_socks, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_chk_resolve_domain_names_v4a, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_chk_use_authentication_socks, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_static_auth_username_socks, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-			_SendMessageW( g_hWnd_auth_username_socks, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_static_auth_password_socks, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-			_SendMessageW( g_hWnd_auth_password_socks, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			_SendMessageW( g_hWnd_chk_resolve_domain_names, WM_SETFONT, ( WPARAM )hFont_options, 0 );
-
-			// Stupid control likes to delete the font object. :-/
-			// We'll make a copy.
-			hFont_copy_proxy = UpdateFont( current_dpi_options );
-			_SendMessageW( g_hWnd_ip_address, WM_SETFONT, ( WPARAM )hFont_copy_proxy, 0 );
-			_SendMessageW( g_hWnd_ip_address_s, WM_SETFONT, ( WPARAM )hFont_copy_proxy, 0 );
-			_SendMessageW( g_hWnd_ip_address_socks, WM_SETFONT, ( WPARAM )hFont_copy_proxy, 0 );
-
-			//
-			// HTTP proxy.
-			//
-			_SendMessageW( g_hWnd_chk_proxy, BM_SETCHECK, ( cfg_enable_proxy ? BST_CHECKED : BST_UNCHECKED ), 0 );
-
-			BOOL enable = ( cfg_enable_proxy ? TRUE : FALSE );
-
-			_EnableWindow( g_hWnd_chk_type_hostname, enable );
-			_EnableWindow( g_hWnd_chk_type_ip_address, enable );
-			_EnableWindow( g_hWnd_hostname, enable );
-			_EnableWindow( g_hWnd_ip_address, enable );
-			_EnableWindow( g_hWnd_static_colon, enable );
-			_EnableWindow( g_hWnd_static_port, enable );
-			_EnableWindow( g_hWnd_port, enable );
-			_EnableWindow( g_hWnd_static_auth_username, enable );
-			_EnableWindow( g_hWnd_auth_username, enable );
-			_EnableWindow( g_hWnd_static_auth_password, enable );
-			_EnableWindow( g_hWnd_auth_password, enable );
-
-			if ( cfg_address_type == 1 )
+			if ( hFont_options != NULL )
 			{
-				_SendMessageW( g_hWnd_chk_type_ip_address, BM_SETCHECK, BST_CHECKED, 0 );
-				_SendMessageW( g_hWnd_chk_type_hostname, BM_SETCHECK, BST_UNCHECKED, 0 );
+				HWND hWnd_child = _GetWindow( hWnd, GW_CHILD );
+				while ( hWnd_child != NULL )
+				{
+					_SendMessageW( hWnd_child, WM_SETFONT, ( WPARAM )hFont_options, 0 );
 
-				_ShowWindow( g_hWnd_hostname, SW_HIDE );
-				_ShowWindow( g_hWnd_ip_address, SW_SHOW );
-			}
-			else
-			{
-				_SendMessageW( g_hWnd_chk_type_hostname, BM_SETCHECK, BST_CHECKED, 0 );
-				_SendMessageW( g_hWnd_chk_type_ip_address, BM_SETCHECK, BST_UNCHECKED, 0 );
+					// Some composite controls (IP address, combo box) ignore WM_SETFONT on
+					// themselves; their inner child controls need the font individually.
+					EnumChildWindows( hWnd_child, EnumChildFontProc, ( LPARAM )hFont_options );
 
-				_ShowWindow( g_hWnd_ip_address, SW_HIDE );
-				_ShowWindow( g_hWnd_hostname, SW_SHOW );
+					hWnd_child = _GetWindow( hWnd_child, GW_HWNDNEXT );
+				}
 			}
 
-			if ( cfg_hostname == NULL )
-			{
-				_SendMessageW( g_hWnd_hostname, WM_SETTEXT, 0, ( LPARAM )L"localhost" );
-			}
-			else
-			{
-				_SendMessageW( g_hWnd_hostname, WM_SETTEXT, 0, ( LPARAM )cfg_hostname );
-			}
-
-			_SendMessageW( g_hWnd_ip_address, IPM_SETADDRESS, 0, cfg_ip_address );
-
-			char value[ 6 ];
-			_memzero( value, sizeof( char ) * 6 );
-			__snprintf( value, 6, "%hu", cfg_port );
-			_SendMessageA( g_hWnd_port, WM_SETTEXT, 0, ( LPARAM )value );
-
-			_SendMessageW( g_hWnd_auth_username, WM_SETTEXT, 0, ( LPARAM )cfg_proxy_auth_username );
-			_SendMessageW( g_hWnd_auth_password, WM_SETTEXT, 0, ( LPARAM )cfg_proxy_auth_password );
-
-			//
-			// HTTPS proxy.
-			//
-			_SendMessageW( g_hWnd_chk_proxy_s, BM_SETCHECK, ( cfg_enable_proxy_s ? BST_CHECKED : BST_UNCHECKED ), 0 );
-
-			enable = ( cfg_enable_proxy_s ? TRUE : FALSE );
-
-			_EnableWindow( g_hWnd_chk_type_hostname_s, enable );
-			_EnableWindow( g_hWnd_chk_type_ip_address_s, enable );
-			_EnableWindow( g_hWnd_hostname_s, enable );
-			_EnableWindow( g_hWnd_ip_address_s, enable );
-			_EnableWindow( g_hWnd_static_colon_s, enable );
-			_EnableWindow( g_hWnd_static_port_s, enable );
-			_EnableWindow( g_hWnd_port_s, enable );
-			_EnableWindow( g_hWnd_static_auth_username_s, enable );
-			_EnableWindow( g_hWnd_auth_username_s, enable );
-			_EnableWindow( g_hWnd_static_auth_password_s, enable );
-			_EnableWindow( g_hWnd_auth_password_s, enable );
-
-			if ( cfg_address_type_s == 1 )
-			{
-				_SendMessageW( g_hWnd_chk_type_ip_address_s, BM_SETCHECK, BST_CHECKED, 0 );
-				_SendMessageW( g_hWnd_chk_type_hostname_s, BM_SETCHECK, BST_UNCHECKED, 0 );
-
-				_ShowWindow( g_hWnd_hostname_s, SW_HIDE );
-				_ShowWindow( g_hWnd_ip_address_s, SW_SHOW );
-			}
-			else
-			{
-				_SendMessageW( g_hWnd_chk_type_hostname_s, BM_SETCHECK, BST_CHECKED, 0 );
-				_SendMessageW( g_hWnd_chk_type_ip_address_s, BM_SETCHECK, BST_UNCHECKED, 0 );
-
-				_ShowWindow( g_hWnd_ip_address_s, SW_HIDE );
-				_ShowWindow( g_hWnd_hostname_s, SW_SHOW );
-			}
-
-			if ( cfg_hostname_s == NULL )
-			{
-				_SendMessageW( g_hWnd_hostname_s, WM_SETTEXT, 0, ( LPARAM )L"localhost" );
-			}
-			else
-			{
-				_SendMessageW( g_hWnd_hostname_s, WM_SETTEXT, 0, ( LPARAM )cfg_hostname_s );
-			}
-
-			_SendMessageW( g_hWnd_ip_address_s, IPM_SETADDRESS, 0, cfg_ip_address_s );
-
-			_memzero( value, sizeof( char ) * 6 );
-			__snprintf( value, 6, "%hu", cfg_port_s );
-			_SendMessageA( g_hWnd_port_s, WM_SETTEXT, 0, ( LPARAM )value );
-
-			_SendMessageW( g_hWnd_auth_username_s, WM_SETTEXT, 0, ( LPARAM )cfg_proxy_auth_username_s );
-			_SendMessageW( g_hWnd_auth_password_s, WM_SETTEXT, 0, ( LPARAM )cfg_proxy_auth_password_s );
-
-			//
-			// SOCKS5 proxy.
-			//
-			_SendMessageW( g_hWnd_chk_proxy_socks, BM_SETCHECK, ( cfg_enable_proxy_socks ? BST_CHECKED : BST_UNCHECKED ), 0 );
-
-			_SendMessageW( g_hWnd_chk_resolve_domain_names_v4a, BM_SETCHECK, ( cfg_resolve_domain_names_v4a ? BST_CHECKED : BST_UNCHECKED ), 0 );
-			_SendMessageW( g_hWnd_chk_resolve_domain_names, BM_SETCHECK, ( cfg_resolve_domain_names ? BST_CHECKED : BST_UNCHECKED ), 0 );
-
-			enable = ( cfg_enable_proxy_socks ? TRUE : FALSE );
-
-			if ( cfg_socks_type == SOCKS_TYPE_V4 )
-			{
-				_SendMessageW( g_hWnd_chk_type_socks4, BM_SETCHECK, BST_CHECKED, 0 );
-				_SendMessageW( g_hWnd_chk_type_socks5, BM_SETCHECK, BST_UNCHECKED, 0 );
-
-				_ShowWindow( g_hWnd_chk_use_authentication_socks, SW_HIDE );
-
-				_ShowWindow( g_hWnd_static_auth_username_socks, SW_HIDE );
-				_ShowWindow( g_hWnd_auth_username_socks, SW_HIDE );
-				_ShowWindow( g_hWnd_static_auth_password_socks, SW_HIDE );
-				_ShowWindow( g_hWnd_auth_password_socks, SW_HIDE );
-
-				_ShowWindow( g_hWnd_chk_resolve_domain_names, SW_HIDE );
-
-				_SendMessageW( g_hWnd_chk_type_hostname_socks, WM_SETTEXT, 0, ( LPARAM )ST_V_Hostname_ );
-
-				_ShowWindow( g_hWnd_static_auth_ident_username_socks, SW_SHOW );
-				_ShowWindow( g_hWnd_auth_ident_username_socks, SW_SHOW );
-				_ShowWindow( g_hWnd_chk_resolve_domain_names_v4a, SW_SHOW );
-			}
-			else
-			{
-				_SendMessageW( g_hWnd_chk_type_socks4, BM_SETCHECK, BST_UNCHECKED, 0 );
-				_SendMessageW( g_hWnd_chk_type_socks5, BM_SETCHECK, BST_CHECKED, 0 );
-
-				_ShowWindow( g_hWnd_static_auth_ident_username_socks, SW_HIDE );
-				_ShowWindow( g_hWnd_auth_ident_username_socks, SW_HIDE );
-				_ShowWindow( g_hWnd_chk_resolve_domain_names_v4a, SW_HIDE );
-
-				_SendMessageW( g_hWnd_chk_type_hostname_socks, WM_SETTEXT, 0, ( LPARAM )ST_V_Hostname___IPv6_address_ );
-
-				_ShowWindow( g_hWnd_chk_use_authentication_socks, SW_SHOW );
-
-				_ShowWindow( g_hWnd_static_auth_username_socks, SW_SHOW );
-				_ShowWindow( g_hWnd_auth_username_socks, SW_SHOW );
-				_ShowWindow( g_hWnd_static_auth_password_socks, SW_SHOW );
-				_ShowWindow( g_hWnd_auth_password_socks, SW_SHOW );
-
-				_ShowWindow( g_hWnd_chk_resolve_domain_names, SW_SHOW );
-			}
-
-			_EnableWindow( g_hWnd_chk_type_socks4, enable );
-			_EnableWindow( g_hWnd_chk_type_socks5, enable );
-			_EnableWindow( g_hWnd_chk_type_hostname_socks, enable );
-			_EnableWindow( g_hWnd_chk_type_ip_address_socks, enable );
-			_EnableWindow( g_hWnd_hostname_socks, enable );
-			_EnableWindow( g_hWnd_ip_address_socks, enable );
-			_EnableWindow( g_hWnd_static_colon_socks, enable );
-			_EnableWindow( g_hWnd_static_port_socks, enable );
-			_EnableWindow( g_hWnd_port_socks, enable );
-			_EnableWindow( g_hWnd_chk_use_authentication_socks, enable );
-			_EnableWindow( g_hWnd_chk_resolve_domain_names, enable );
-			_EnableWindow( g_hWnd_static_auth_ident_username_socks, enable );
-			_EnableWindow( g_hWnd_auth_ident_username_socks, enable );
-			_EnableWindow( g_hWnd_chk_resolve_domain_names_v4a, enable );
-
-			if ( cfg_enable_proxy_socks && !cfg_use_authentication_socks )
-			{
-				enable = FALSE;
-			}
-
-			_EnableWindow( g_hWnd_static_auth_username_socks, enable );
-			_EnableWindow( g_hWnd_auth_username_socks, enable );
-			_EnableWindow( g_hWnd_static_auth_password_socks, enable );
-			_EnableWindow( g_hWnd_auth_password_socks, enable );
-
-			_SendMessageW( g_hWnd_chk_use_authentication_socks, BM_SETCHECK, ( cfg_use_authentication_socks ? BST_CHECKED : BST_UNCHECKED ), 0 );
-
-			if ( cfg_address_type_socks == 1 )
-			{
-				_SendMessageW( g_hWnd_chk_type_ip_address_socks, BM_SETCHECK, BST_CHECKED, 0 );
-				_SendMessageW( g_hWnd_chk_type_hostname_socks, BM_SETCHECK, BST_UNCHECKED, 0 );
-
-				_ShowWindow( g_hWnd_hostname_socks, SW_HIDE );
-				_ShowWindow( g_hWnd_ip_address_socks, SW_SHOW );
-			}
-			else
-			{
-				_SendMessageW( g_hWnd_chk_type_hostname_socks, BM_SETCHECK, BST_CHECKED, 0 );
-				_SendMessageW( g_hWnd_chk_type_ip_address_socks, BM_SETCHECK, BST_UNCHECKED, 0 );
-
-				_ShowWindow( g_hWnd_ip_address_socks, SW_HIDE );
-				_ShowWindow( g_hWnd_hostname_socks, SW_SHOW );
-			}
-
-			if ( cfg_hostname_socks == NULL )
-			{
-				_SendMessageW( g_hWnd_hostname_socks, WM_SETTEXT, 0, ( LPARAM )L"localhost" );
-			}
-			else
-			{
-				_SendMessageW( g_hWnd_hostname_socks, WM_SETTEXT, 0, ( LPARAM )cfg_hostname_socks );
-			}
-
-			_SendMessageW( g_hWnd_ip_address_socks, IPM_SETADDRESS, 0, cfg_ip_address_socks );
-
-			_memzero( value, sizeof( char ) * 6 );
-			__snprintf( value, 6, "%hu", cfg_port_socks );
-			_SendMessageA( g_hWnd_port_socks, WM_SETTEXT, 0, ( LPARAM )value );
-
-			_SendMessageW( g_hWnd_auth_username_socks, WM_SETTEXT, 0, ( LPARAM )cfg_proxy_auth_username_socks );
-			_SendMessageW( g_hWnd_auth_password_socks, WM_SETTEXT, 0, ( LPARAM )cfg_proxy_auth_password_socks );
-
-			_SendMessageW( g_hWnd_auth_ident_username_socks, WM_SETTEXT, 0, ( LPARAM )cfg_proxy_auth_ident_username_socks );
+			RefreshProxyList();
+			RefreshProxyCombo();
 
 			return 0;
 		}
@@ -570,114 +880,14 @@ LRESULT CALLBACK ProxyTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 			RECT rc;
 			_GetClientRect( hWnd, &rc );
 
-			HDWP hdwp = _BeginDeferWindowPos( 45 );
-			_DeferWindowPos( hdwp, g_hWnd_chk_proxy, HWND_TOP, 0, 0, rc.right - ( 10 ), _SCALE_O_( 20 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_chk_type_hostname, HWND_TOP, 0, _SCALE_O_( 20 ), _SCALE_O_( 200 ), _SCALE_O_( 20 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_chk_type_ip_address, HWND_TOP, _SCALE_O_( 205 ), _SCALE_O_( 20 ), _SCALE_O_( 110 ), _SCALE_O_( 20 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_hostname, HWND_TOP, 0, _SCALE_O_( 40 ), _SCALE_O_( 310 ), _SCALE_O_( 23 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_ip_address, HWND_TOP, 0, _SCALE_O_( 40 ), _SCALE_O_( 310 ), _SCALE_O_( 23 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_static_colon, HWND_TOP, _SCALE_O_( 311 ), _SCALE_O_( 43 ), _SCALE_O_( 8 ), _SCALE_O_( 17 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_static_port, HWND_TOP, _SCALE_O_( 320 ), _SCALE_O_( 22 ), _SCALE_O_( 75 ), _SCALE_O_( 17 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_port, HWND_TOP, _SCALE_O_( 320 ), _SCALE_O_( 40 ), _SCALE_O_( 75 ), _SCALE_O_( 23 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_static_auth_username, HWND_TOP, 0, _SCALE_O_( 69 ), _SCALE_O_( 150 ), _SCALE_O_( 17 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_auth_username, HWND_TOP, 0, _SCALE_O_( 87 ), _SCALE_O_( 150 ), _SCALE_O_( 23 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_static_auth_password, HWND_TOP, _SCALE_O_( 160 ), _SCALE_O_( 69 ), _SCALE_O_( 150 ), _SCALE_O_( 17 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_auth_password, HWND_TOP, _SCALE_O_( 160 ), _SCALE_O_( 87 ), _SCALE_O_( 150 ), _SCALE_O_( 23 ), SWP_NOZORDER );
-
-			//
-
-			_DeferWindowPos( hdwp, g_hWnd_static_proxy_hoz1, HWND_TOP, 0, _SCALE_O_( 120 ), rc.right, _SCALE_O_( 1 ), SWP_NOZORDER );
-
-			//
-
-			_DeferWindowPos( hdwp, g_hWnd_chk_proxy_s, HWND_TOP, 0, _SCALE_O_( 128 ), rc.right - _SCALE_O_( 10 ), _SCALE_O_( 20 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_chk_type_hostname_s, HWND_TOP, 0, _SCALE_O_( 148 ), _SCALE_O_( 200 ), _SCALE_O_( 20 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_chk_type_ip_address_s, HWND_TOP, _SCALE_O_( 205 ), _SCALE_O_( 148 ), _SCALE_O_( 110 ), _SCALE_O_( 20 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_hostname_s, HWND_TOP, 0, _SCALE_O_( 168 ), _SCALE_O_( 310 ), _SCALE_O_( 23 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_ip_address_s, HWND_TOP, 0, _SCALE_O_( 168 ), _SCALE_O_( 310 ), _SCALE_O_( 23 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_static_colon_s, HWND_TOP, _SCALE_O_( 311 ), _SCALE_O_( 171 ), _SCALE_O_( 8 ), _SCALE_O_( 17 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_static_port_s, HWND_TOP, _SCALE_O_( 320 ), _SCALE_O_( 150 ), _SCALE_O_( 75 ), _SCALE_O_( 17 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_port_s, HWND_TOP, _SCALE_O_( 320 ), _SCALE_O_( 168 ), _SCALE_O_( 75 ), _SCALE_O_( 23 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_static_auth_username_s, HWND_TOP, 0, _SCALE_O_( 197 ), _SCALE_O_( 150 ), _SCALE_O_( 17 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_auth_username_s, HWND_TOP, 0, _SCALE_O_( 215 ), _SCALE_O_( 150 ), _SCALE_O_( 23 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_static_auth_password_s, HWND_TOP, _SCALE_O_( 160 ), _SCALE_O_( 197 ), _SCALE_O_( 150 ), _SCALE_O_( 17 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_auth_password_s, HWND_TOP, _SCALE_O_( 160 ), _SCALE_O_( 215 ), _SCALE_O_( 150 ), _SCALE_O_( 23 ), SWP_NOZORDER );
-
-			//
-
-			_DeferWindowPos( hdwp, g_hWnd_static_proxy_hoz2, HWND_TOP, 0, _SCALE_O_( 248 ), rc.right, _SCALE_O_( 1 ), SWP_NOZORDER );
-
-			//
-
-			_DeferWindowPos( hdwp, g_hWnd_chk_proxy_socks, HWND_TOP, 0, _SCALE_O_( 256 ), _SCALE_O_( 200 ), _SCALE_O_( 20 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_chk_type_socks4, HWND_TOP, _SCALE_O_( 205 ), _SCALE_O_( 256 ), _SCALE_O_( 90 ), _SCALE_O_( 20 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_chk_type_socks5, HWND_TOP, _SCALE_O_( 300 ), _SCALE_O_( 256 ), _SCALE_O_( 90 ), _SCALE_O_( 20 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_chk_type_hostname_socks, HWND_TOP, 0, _SCALE_O_( 276 ), _SCALE_O_( 200 ), _SCALE_O_( 20 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_chk_type_ip_address_socks, HWND_TOP, _SCALE_O_( 205 ), _SCALE_O_( 276 ), _SCALE_O_( 110 ), _SCALE_O_( 20 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_hostname_socks, HWND_TOP, 0, _SCALE_O_( 296 ), _SCALE_O_( 310 ), _SCALE_O_( 23 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_ip_address_socks, HWND_TOP, 0, _SCALE_O_( 296 ), _SCALE_O_( 310 ), _SCALE_O_( 23 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_static_colon_socks, HWND_TOP, _SCALE_O_( 311 ), _SCALE_O_( 299 ), _SCALE_O_( 8 ), _SCALE_O_( 17 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_static_port_socks, HWND_TOP, _SCALE_O_( 320 ), _SCALE_O_( 278 ), _SCALE_O_( 75 ), _SCALE_O_( 17 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_port_socks, HWND_TOP, _SCALE_O_( 320 ), _SCALE_O_( 296 ), _SCALE_O_( 75 ), _SCALE_O_( 23 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_static_auth_ident_username_socks, HWND_TOP, 0, _SCALE_O_( 325 ), rc.right - _SCALE_O_( 10 ), _SCALE_O_( 17 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_auth_ident_username_socks, HWND_TOP, 0, _SCALE_O_( 343 ), _SCALE_O_( 150 ), _SCALE_O_( 23 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_chk_resolve_domain_names_v4a, HWND_TOP, 0, _SCALE_O_( 371 ), rc.right - _SCALE_O_( 10 ), _SCALE_O_( 20 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_chk_use_authentication_socks, HWND_TOP, 0, _SCALE_O_( 325 ), rc.right - _SCALE_O_( 10 ), _SCALE_O_( 20 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_static_auth_username_socks, HWND_TOP, _SCALE_O_( 15 ), _SCALE_O_( 345 ), _SCALE_O_( 150 ), _SCALE_O_( 17 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_auth_username_socks, HWND_TOP, _SCALE_O_( 15 ), _SCALE_O_( 363 ), _SCALE_O_( 150 ), _SCALE_O_( 23 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_static_auth_password_socks, HWND_TOP, _SCALE_O_( 175 ), _SCALE_O_( 345 ), _SCALE_O_( 150 ), _SCALE_O_( 17 ), SWP_NOZORDER );
-			_DeferWindowPos( hdwp, g_hWnd_auth_password_socks, HWND_TOP, _SCALE_O_( 175 ), _SCALE_O_( 363 ), _SCALE_O_( 150 ), _SCALE_O_( 23 ), SWP_NOZORDER );
-
-			_DeferWindowPos( hdwp, g_hWnd_chk_resolve_domain_names, HWND_TOP, 0, _SCALE_O_( 391 ), rc.right - _SCALE_O_( 10 ), _SCALE_O_( 20 ), SWP_NOZORDER );
-
-			_EndDeferWindowPos( hdwp );
+			_SetWindowPos( g_hWnd_proxy_list, HWND_TOP, 10, 10, rc.right - 20, rc.bottom - 85, SWP_NOZORDER );
+			_SetWindowPos( g_hWnd_btn_proxy_add, HWND_TOP, 10, rc.bottom - 65, 80, 23, SWP_NOZORDER );
+			_SetWindowPos( g_hWnd_btn_proxy_edit, HWND_TOP, 95, rc.bottom - 65, 80, 23, SWP_NOZORDER );
+			_SetWindowPos( g_hWnd_btn_proxy_remove, HWND_TOP, 180, rc.bottom - 65, 80, 23, SWP_NOZORDER );
+			_SetWindowPos( g_hWnd_static_proxy_select, HWND_TOP, 10, rc.bottom - 32, 60, 17, SWP_NOZORDER );
+			_SetWindowPos( g_hWnd_combo_proxy_select, HWND_TOP, 80, rc.bottom - 35, rc.right - 90, 200, SWP_NOZORDER );
 
 			return 0;
-		}
-		break;
-
-		case WM_GET_DPI:
-		{
-			return current_dpi_options;
-		}
-		break;
-
-		case WM_DPICHANGED_AFTERPARENT:
-		{
-			// This stupid control doesn't adapt to the change in font size. It needs to be resized first.
-			_SetWindowPos( g_hWnd_ip_address, HWND_TOP, 0, 0, _SCALE_O_( 310 ), _SCALE_O_( 23 ), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE );
-			_SetWindowPos( g_hWnd_ip_address_s, HWND_TOP, 0, 0, _SCALE_O_( 310 ), _SCALE_O_( 23 ), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE );
-			_SetWindowPos( g_hWnd_ip_address_socks, HWND_TOP, 0, 0, _SCALE_O_( 310 ), _SCALE_O_( 23 ), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE );
-			_DeleteObject( hFont_copy_proxy );
-			hFont_copy_proxy = UpdateFont( current_dpi_options );
-			_SendMessageW( g_hWnd_ip_address, WM_SETFONT, ( WPARAM )hFont_copy_proxy, 0 );
-			_SendMessageW( g_hWnd_ip_address_s, WM_SETFONT, ( WPARAM )hFont_copy_proxy, 0 );
-			_SendMessageW( g_hWnd_ip_address_socks, WM_SETFONT, ( WPARAM )hFont_copy_proxy, 0 );
-
-			// Return value is ignored.
-			return TRUE;
 		}
 		break;
 
@@ -685,284 +895,65 @@ LRESULT CALLBACK ProxyTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 		{
 			switch ( LOWORD( wParam ) )
 			{
-				case BTN_PROXY:
+				case BTN_PROXY_ADD:
 				{
-					BOOL enable = ( _SendMessageW( g_hWnd_chk_proxy, BM_GETCHECK, 0, 0 ) == BST_CHECKED ? TRUE : FALSE );
-
-					_EnableWindow( g_hWnd_chk_type_hostname, enable );
-					_EnableWindow( g_hWnd_chk_type_ip_address, enable );
-					_EnableWindow( g_hWnd_hostname, enable );
-					_EnableWindow( g_hWnd_ip_address, enable );
-					_EnableWindow( g_hWnd_static_colon, enable );
-					_EnableWindow( g_hWnd_static_port, enable );
-					_EnableWindow( g_hWnd_port, enable );
-					_EnableWindow( g_hWnd_static_auth_username, enable );
-					_EnableWindow( g_hWnd_auth_username, enable );
-					_EnableWindow( g_hWnd_static_auth_password, enable );
-					_EnableWindow( g_hWnd_auth_password, enable );
-
-					_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
+					OpenProxyEditDialog( true, 0 );
 				}
 				break;
 
-				case BTN_PROXY_S:
+				case BTN_PROXY_EDIT:
 				{
-					BOOL enable = ( _SendMessageW( g_hWnd_chk_proxy_s, BM_GETCHECK, 0, 0 ) == BST_CHECKED ? TRUE : FALSE );
-
-					_EnableWindow( g_hWnd_chk_type_hostname_s, enable );
-					_EnableWindow( g_hWnd_chk_type_ip_address_s, enable );
-					_EnableWindow( g_hWnd_hostname_s, enable );
-					_EnableWindow( g_hWnd_ip_address_s, enable );
-					_EnableWindow( g_hWnd_static_colon_s, enable );
-					_EnableWindow( g_hWnd_static_port_s, enable );
-					_EnableWindow( g_hWnd_port_s, enable );
-					_EnableWindow( g_hWnd_static_auth_username_s, enable );
-					_EnableWindow( g_hWnd_auth_username_s, enable );
-					_EnableWindow( g_hWnd_static_auth_password_s, enable );
-					_EnableWindow( g_hWnd_auth_password_s, enable );
-
-					_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
+					OpenProxyEditDialog( false, GetProxyListSelection() );
 				}
 				break;
 
-				case BTN_PROXY_SOCKS:
+				case BTN_PROXY_REMOVE:
 				{
-					BOOL enable = ( _SendMessageW( g_hWnd_chk_proxy_socks, BM_GETCHECK, 0, 0 ) == BST_CHECKED ? TRUE : FALSE );
-
-					_EnableWindow( g_hWnd_chk_type_socks4, enable );
-					_EnableWindow( g_hWnd_chk_type_socks5, enable );
-					_EnableWindow( g_hWnd_chk_type_hostname_socks, enable );
-					_EnableWindow( g_hWnd_chk_type_ip_address_socks, enable );
-					_EnableWindow( g_hWnd_hostname_socks, enable );
-					_EnableWindow( g_hWnd_ip_address_socks, enable );
-					_EnableWindow( g_hWnd_static_colon_socks, enable );
-					_EnableWindow( g_hWnd_static_port_socks, enable );
-					_EnableWindow( g_hWnd_port_socks, enable );
-					_EnableWindow( g_hWnd_chk_use_authentication_socks, enable );
-					_EnableWindow( g_hWnd_chk_resolve_domain_names, enable );
-					_EnableWindow( g_hWnd_static_auth_ident_username_socks, enable );
-					_EnableWindow( g_hWnd_auth_ident_username_socks, enable );
-					_EnableWindow( g_hWnd_chk_resolve_domain_names_v4a, enable );
-
-					if ( enable == TRUE && ( _SendMessageW( g_hWnd_chk_use_authentication_socks, BM_GETCHECK, 0, 0 ) == BST_UNCHECKED ? TRUE : FALSE ) )
+					unsigned char selection = GetProxyListSelection();
+					if ( selection > 0 )
 					{
-						enable = FALSE;
-					}
-
-					_EnableWindow( g_hWnd_static_auth_username_socks, enable );
-					_EnableWindow( g_hWnd_auth_username_socks, enable );
-					_EnableWindow( g_hWnd_static_auth_password_socks, enable );
-					_EnableWindow( g_hWnd_auth_password_socks, enable );
-
-					_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
-				}
-				break;
-
-				case BTN_AUTHENTICATION_SOCKS:
-				{
-					BOOL enable = ( _SendMessageW( g_hWnd_chk_use_authentication_socks, BM_GETCHECK, 0, 0 ) == BST_CHECKED ? TRUE : FALSE );
-
-					_EnableWindow( g_hWnd_static_auth_username_socks, enable );
-					_EnableWindow( g_hWnd_auth_username_socks, enable );
-					_EnableWindow( g_hWnd_static_auth_password_socks, enable );
-					_EnableWindow( g_hWnd_auth_password_socks, enable );
-
-					_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
-				}
-				break;
-
-				case EDIT_PORT:
-				case EDIT_PORT_S:
-				case EDIT_PORT_SOCKS:
-				{
-					if ( HIWORD( wParam ) == EN_UPDATE )
-					{
-						DWORD sel_start;
-
-						char value[ 11 ];
-						_SendMessageA( ( HWND )lParam, WM_GETTEXT, 6, ( LPARAM )value );
-						unsigned long num = _strtoul( value, NULL, 10 );
-
-						if ( num > 65535 )
+						if ( CMessageBoxW( hWnd, L"Remove the selected proxy entry?", PROGRAM_CAPTION, CMB_ICONWARNING | CMB_YESNO ) == CMBIDYES )
 						{
-							_SendMessageA( ( HWND )lParam, EM_GETSEL, ( WPARAM )&sel_start, NULL );
+							DoublyLinkedList *node = g_proxy_list;
+							for ( unsigned char i = 1; i < selection && node != NULL; ++i )
+							{
+								node = node->next;
+							}
 
-							_SendMessageA( ( HWND )lParam, WM_SETTEXT, 0, ( LPARAM )"65535" );
+							if ( node != NULL )
+							{
+								DLL_RemoveNode( &g_proxy_list, node );
+								FreeProxyEntry( ( PROXY_ENTRY * )node->data );
+								GlobalFree( node );
 
-							_SendMessageA( ( HWND )lParam, EM_SETSEL, sel_start, sel_start );
-						}
-						else if ( num == 0 )
-						{
-							_SendMessageA( ( HWND )lParam, EM_GETSEL, ( WPARAM )&sel_start, NULL );
+								// Adjust the active selection: if the removed entry was at or
+								// before the active index, clamp it.
+								if ( cfg_selected_proxy >= selection )
+								{
+									ApplyProxySelection( ( cfg_selected_proxy > selection ? cfg_selected_proxy - 1 : 0 ) );
+								}
+								else
+								{
+									SaveProxyList();
+								}
 
-							_SendMessageA( ( HWND )lParam, WM_SETTEXT, 0, ( LPARAM )"1" );
-
-							_SendMessageA( ( HWND )lParam, EM_SETSEL, sel_start, sel_start );
-						}
-
-						if ( ( LOWORD( wParam ) == EDIT_PORT	&& num != cfg_port ) ||
-							 ( LOWORD( wParam ) == EDIT_PORT_S	&& num != cfg_port_s ) ||
-							 ( LOWORD( wParam ) == EDIT_PORT_SOCKS	&& num != cfg_port_socks ) )
-						{
-							_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
+								RefreshProxyList();
+								RefreshProxyCombo();
+							}
 						}
 					}
 				}
 				break;
 
-				case EDIT_HOST:
-				case EDIT_AUTH_USERNAME:
-				case EDIT_AUTH_PASSWORD:
-				case EDIT_HOST_S:
-				case EDIT_AUTH_USERNAME_S:
-				case EDIT_AUTH_PASSWORD_S:
-				case EDIT_HOST_SOCKS:
-				case EDIT_AUTH_IDENT_USERNAME_SOCKS:
-				case EDIT_AUTH_USERNAME_SOCKS:
-				case EDIT_AUTH_PASSWORD_SOCKS:
+				case COMBO_PROXY_SELECT:
 				{
-					if ( HIWORD( wParam ) == EN_UPDATE )
+					if ( HIWORD( wParam ) == CBN_SELCHANGE )
 					{
-						_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
+						unsigned char selection = ( unsigned char )_SendMessageW( g_hWnd_combo_proxy_select, CB_GETCURSEL, 0, 0 );
+						ApplyProxySelection( selection );
+
+						RefreshProxyList();
 					}
-				}
-				break;
-
-				case EDIT_IP_ADDRESS:
-				case EDIT_IP_ADDRESS_S:
-				case EDIT_IP_ADDRESS_SOCKS:
-				{
-					if ( HIWORD( wParam ) == EN_CHANGE )
-					{
-						_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
-					}
-				}
-				break;
-
-				case BTN_RESOLVE_DOMAIN_NAMES_V4A:
-				case BTN_RESOLVE_DOMAIN_NAMES:
-				{
-					_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
-				}
-				break;
-
-				case BTN_TYPE_HOST:
-				{
-					if ( _SendMessageW( g_hWnd_chk_type_hostname, BM_GETCHECK, 0, 0 ) == BST_CHECKED )
-					{
-						_ShowWindow( g_hWnd_ip_address, SW_HIDE );
-						_ShowWindow( g_hWnd_hostname, SW_SHOW );
-					}
-
-					_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
-				}
-				break;
-
-				case BTN_TYPE_HOST_S:
-				{
-					if ( _SendMessageW( g_hWnd_chk_type_hostname_s, BM_GETCHECK, 0, 0 ) == BST_CHECKED )
-					{
-						_ShowWindow( g_hWnd_ip_address_s, SW_HIDE );
-						_ShowWindow( g_hWnd_hostname_s, SW_SHOW );
-					}
-
-					_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
-				}
-				break;
-
-				case BTN_TYPE_HOST_SOCKS:
-				{
-					if ( _SendMessageW( g_hWnd_chk_type_hostname_socks, BM_GETCHECK, 0, 0 ) == BST_CHECKED )
-					{
-						_ShowWindow( g_hWnd_ip_address_socks, SW_HIDE );
-						_ShowWindow( g_hWnd_hostname_socks, SW_SHOW );
-					}
-
-					_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
-				}
-				break;
-
-				case BTN_TYPE_IP_ADDRESS:
-				{
-					if ( _SendMessageW( g_hWnd_chk_type_ip_address, BM_GETCHECK, 0, 0 ) == BST_CHECKED )
-					{
-						_ShowWindow( g_hWnd_hostname, SW_HIDE );
-						_ShowWindow( g_hWnd_ip_address, SW_SHOW );
-					}
-
-					_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
-				}
-				break;
-
-				case BTN_TYPE_IP_ADDRESS_S:
-				{
-					if ( _SendMessageW( g_hWnd_chk_type_ip_address_s, BM_GETCHECK, 0, 0 ) == BST_CHECKED )
-					{
-						_ShowWindow( g_hWnd_hostname_s, SW_HIDE );
-						_ShowWindow( g_hWnd_ip_address_s, SW_SHOW );
-					}
-
-					_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
-				}
-				break;
-
-				case BTN_TYPE_IP_ADDRESS_SOCKS:
-				{
-					if ( _SendMessageW( g_hWnd_chk_type_ip_address_socks, BM_GETCHECK, 0, 0 ) == BST_CHECKED )
-					{
-						_ShowWindow( g_hWnd_hostname_socks, SW_HIDE );
-						_ShowWindow( g_hWnd_ip_address_socks, SW_SHOW );
-					}
-
-					_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
-				}
-				break;
-
-				case BTN_TYPE_SOCKS4:
-				{
-					if ( _SendMessageW( g_hWnd_chk_type_socks4, BM_GETCHECK, 0, 0 ) == BST_CHECKED )
-					{
-						_ShowWindow( g_hWnd_chk_use_authentication_socks, SW_HIDE );
-
-						_ShowWindow( g_hWnd_static_auth_username_socks, SW_HIDE );
-						_ShowWindow( g_hWnd_auth_username_socks, SW_HIDE );
-						_ShowWindow( g_hWnd_static_auth_password_socks, SW_HIDE );
-						_ShowWindow( g_hWnd_auth_password_socks, SW_HIDE );
-
-						_ShowWindow( g_hWnd_chk_resolve_domain_names, SW_HIDE );
-
-						_SendMessageW( g_hWnd_chk_type_hostname_socks, WM_SETTEXT, 0, ( LPARAM )ST_V_Hostname_ );
-
-						_ShowWindow( g_hWnd_static_auth_ident_username_socks, SW_SHOW );
-						_ShowWindow( g_hWnd_auth_ident_username_socks, SW_SHOW );
-						_ShowWindow( g_hWnd_chk_resolve_domain_names_v4a, SW_SHOW );
-					}
-
-					_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
-				}
-				break;
-
-				case BTN_TYPE_SOCKS5:
-				{
-					if ( _SendMessageW( g_hWnd_chk_type_socks5, BM_GETCHECK, 0, 0 ) == BST_CHECKED )
-					{
-						_ShowWindow( g_hWnd_static_auth_ident_username_socks, SW_HIDE );
-						_ShowWindow( g_hWnd_auth_ident_username_socks, SW_HIDE );
-						_ShowWindow( g_hWnd_chk_resolve_domain_names_v4a, SW_HIDE );
-
-						_SendMessageW( g_hWnd_chk_type_hostname_socks, WM_SETTEXT, 0, ( LPARAM )ST_V_Hostname___IPv6_address_ );
-
-						_ShowWindow( g_hWnd_chk_use_authentication_socks, SW_SHOW );
-
-						_ShowWindow( g_hWnd_static_auth_username_socks, SW_SHOW );
-						_ShowWindow( g_hWnd_auth_username_socks, SW_SHOW );
-						_ShowWindow( g_hWnd_static_auth_password_socks, SW_SHOW );
-						_ShowWindow( g_hWnd_auth_password_socks, SW_SHOW );
-
-						_ShowWindow( g_hWnd_chk_resolve_domain_names, SW_SHOW );
-					}
-
-					_SendMessageW( g_hWnd_options, WM_OPTIONS_CHANGED, TRUE, 0 );
 				}
 				break;
 			}
@@ -973,283 +964,9 @@ LRESULT CALLBACK ProxyTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 
 		case WM_SAVE_OPTIONS:
 		{
-			//
-			// HTTP proxy.
-			//
-			cfg_enable_proxy = ( _SendMessageW( g_hWnd_chk_proxy, BM_GETCHECK, 0, 0 ) == BST_CHECKED ? true : false );
-
-			cfg_address_type = ( _SendMessageW( g_hWnd_chk_type_ip_address, BM_GETCHECK, 0, 0 ) == BST_CHECKED ? 1 : 0 );
-
-			unsigned int hostname_length = ( unsigned int )_SendMessageW( g_hWnd_hostname, WM_GETTEXTLENGTH, 0, 0 ) + 1;	// Include the NULL terminator.
-			if ( cfg_hostname != NULL )
-			{
-				GlobalFree( cfg_hostname );
-			}
-			cfg_hostname = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * hostname_length );
-			_SendMessageW( g_hWnd_hostname, WM_GETTEXT, hostname_length, ( LPARAM )cfg_hostname );
-
-			_SendMessageW( g_hWnd_ip_address, IPM_GETADDRESS, 0, ( LPARAM )&cfg_ip_address );
-
-			char value[ 6 ];
-
-			_SendMessageA( g_hWnd_port, WM_GETTEXT, 6, ( LPARAM )value );
-			cfg_port = ( unsigned short )_strtoul( value, NULL, 10 );
-
-			unsigned int auth_length = ( unsigned int )_SendMessageW( g_hWnd_auth_username, WM_GETTEXTLENGTH, 0, 0 ) + 1;	// Include the NULL terminator.
-			if ( cfg_proxy_auth_username != NULL )
-			{
-				GlobalFree( cfg_proxy_auth_username );
-			}
-			cfg_proxy_auth_username = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * auth_length );
-			_SendMessageW( g_hWnd_auth_username, WM_GETTEXT, auth_length, ( LPARAM )cfg_proxy_auth_username );
-
-			auth_length = ( unsigned int )_SendMessageW( g_hWnd_auth_password, WM_GETTEXTLENGTH, 0, 0 ) + 1;	// Include the NULL terminator.
-			if ( cfg_proxy_auth_password != NULL )
-			{
-				GlobalFree( cfg_proxy_auth_password );
-			}
-			cfg_proxy_auth_password = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * auth_length );
-			_SendMessageW( g_hWnd_auth_password, WM_GETTEXT, auth_length, ( LPARAM )cfg_proxy_auth_password );
-
-			if ( normaliz_state == NORMALIZ_STATE_RUNNING )
-			{
-				if ( cfg_address_type == 0 )
-				{
-					if ( g_punycode_hostname != NULL )
-					{
-						GlobalFree( g_punycode_hostname );
-						g_punycode_hostname = NULL;
-					}
-
-					int punycode_length = _IdnToAscii( 0, cfg_hostname, hostname_length, NULL, 0 );
-
-					if ( punycode_length > ( int )hostname_length )
-					{
-						g_punycode_hostname = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * punycode_length );
-						_IdnToAscii( 0, cfg_hostname, hostname_length, g_punycode_hostname, punycode_length );
-					}
-				}
-			}
-
-			//
-			// HTTPS proxy.
-			//
-			cfg_enable_proxy_s = ( _SendMessageW( g_hWnd_chk_proxy_s, BM_GETCHECK, 0, 0 ) == BST_CHECKED ? true : false );
-
-			cfg_address_type_s = ( _SendMessageW( g_hWnd_chk_type_ip_address_s, BM_GETCHECK, 0, 0 ) == BST_CHECKED ? 1 : 0 );
-
-			hostname_length = ( unsigned int )_SendMessageW( g_hWnd_hostname_s, WM_GETTEXTLENGTH, 0, 0 ) + 1;	// Include the NULL terminator.
-			if ( cfg_hostname_s != NULL )
-			{
-				GlobalFree( cfg_hostname_s );
-			}
-			cfg_hostname_s = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * hostname_length );
-			_SendMessageW( g_hWnd_hostname_s, WM_GETTEXT, hostname_length, ( LPARAM )cfg_hostname_s );
-
-			_SendMessageW( g_hWnd_ip_address_s, IPM_GETADDRESS, 0, ( LPARAM )&cfg_ip_address_s );
-
-			_SendMessageA( g_hWnd_port_s, WM_GETTEXT, 6, ( LPARAM )value );
-			cfg_port_s = ( unsigned short )_strtoul( value, NULL, 10 );
-
-			auth_length = ( unsigned int )_SendMessageW( g_hWnd_auth_username_s, WM_GETTEXTLENGTH, 0, 0 ) + 1;	// Include the NULL terminator.
-			if ( cfg_proxy_auth_username_s != NULL )
-			{
-				GlobalFree( cfg_proxy_auth_username_s );
-			}
-			cfg_proxy_auth_username_s = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * auth_length );
-			_SendMessageW( g_hWnd_auth_username_s, WM_GETTEXT, auth_length, ( LPARAM )cfg_proxy_auth_username_s );
-
-			auth_length = ( unsigned int )_SendMessageW( g_hWnd_auth_password_s, WM_GETTEXTLENGTH, 0, 0 ) + 1;	// Include the NULL terminator.
-			if ( cfg_proxy_auth_password_s != NULL )
-			{
-				GlobalFree( cfg_proxy_auth_password_s );
-			}
-			cfg_proxy_auth_password_s = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * auth_length );
-			_SendMessageW( g_hWnd_auth_password_s, WM_GETTEXT, auth_length, ( LPARAM )cfg_proxy_auth_password_s );
-
-			if ( normaliz_state == NORMALIZ_STATE_RUNNING )
-			{
-				if ( cfg_address_type_s == 0 )
-				{
-					if ( g_punycode_hostname_s != NULL )
-					{
-						GlobalFree( g_punycode_hostname_s );
-						g_punycode_hostname_s = NULL;
-					}
-
-					int punycode_length = _IdnToAscii( 0, cfg_hostname_s, hostname_length, NULL, 0 );
-
-					if ( punycode_length > ( int )hostname_length )
-					{
-						g_punycode_hostname_s = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * punycode_length );
-						_IdnToAscii( 0, cfg_hostname_s, hostname_length, g_punycode_hostname_s, punycode_length );
-					}
-				}
-			}
-
-			//
-			// SOCKS5 proxy.
-			//
-			cfg_enable_proxy_socks = ( _SendMessageW( g_hWnd_chk_proxy_socks, BM_GETCHECK, 0, 0 ) == BST_CHECKED ? true : false );
-
-			cfg_socks_type = ( _SendMessageW( g_hWnd_chk_type_socks5, BM_GETCHECK, 0, 0 ) == BST_CHECKED ? SOCKS_TYPE_V5 : SOCKS_TYPE_V4 );
-
-			cfg_address_type_socks = ( _SendMessageW( g_hWnd_chk_type_ip_address_socks, BM_GETCHECK, 0, 0 ) == BST_CHECKED ? 1 : 0 );
-
-			hostname_length = ( unsigned int )_SendMessageW( g_hWnd_hostname_socks, WM_GETTEXTLENGTH, 0, 0 ) + 1;	// Include the NULL terminator.
-			if ( cfg_hostname_socks != NULL )
-			{
-				GlobalFree( cfg_hostname_socks );
-			}
-			cfg_hostname_socks = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * hostname_length );
-			_SendMessageW( g_hWnd_hostname_socks, WM_GETTEXT, hostname_length, ( LPARAM )cfg_hostname_socks );
-
-			_SendMessageW( g_hWnd_ip_address_socks, IPM_GETADDRESS, 0, ( LPARAM )&cfg_ip_address_socks );
-
-			_SendMessageA( g_hWnd_port_socks, WM_GETTEXT, 6, ( LPARAM )value );
-			cfg_port_socks = ( unsigned short )_strtoul( value, NULL, 10 );
-
-			cfg_use_authentication_socks = ( _SendMessageW( g_hWnd_chk_use_authentication_socks, BM_GETCHECK, 0, 0 ) == BST_CHECKED ? true : false );
-
-			cfg_resolve_domain_names_v4a = ( _SendMessageW( g_hWnd_chk_resolve_domain_names_v4a, BM_GETCHECK, 0, 0 ) == BST_CHECKED ? true : false );
-			cfg_resolve_domain_names = ( _SendMessageW( g_hWnd_chk_resolve_domain_names, BM_GETCHECK, 0, 0 ) == BST_CHECKED ? true : false );
-
-			auth_length = ( unsigned int )_SendMessageW( g_hWnd_auth_ident_username_socks, WM_GETTEXTLENGTH, 0, 0 ) + 1;	// Include the NULL terminator.
-			if ( cfg_proxy_auth_ident_username_socks != NULL )
-			{
-				GlobalFree( cfg_proxy_auth_ident_username_socks );
-			}
-			cfg_proxy_auth_ident_username_socks = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * auth_length );
-			_SendMessageW( g_hWnd_auth_ident_username_socks, WM_GETTEXT, auth_length, ( LPARAM )cfg_proxy_auth_ident_username_socks );
-
-			auth_length = ( unsigned int )_SendMessageW( g_hWnd_auth_username_socks, WM_GETTEXTLENGTH, 0, 0 ) + 1;	// Include the NULL terminator.
-			if ( cfg_proxy_auth_username_socks != NULL )
-			{
-				GlobalFree( cfg_proxy_auth_username_socks );
-			}
-			cfg_proxy_auth_username_socks = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * auth_length );
-			_SendMessageW( g_hWnd_auth_username_socks, WM_GETTEXT, auth_length, ( LPARAM )cfg_proxy_auth_username_socks );
-
-			auth_length = ( unsigned int )_SendMessageW( g_hWnd_auth_password_socks, WM_GETTEXTLENGTH, 0, 0 ) + 1;	// Include the NULL terminator.
-			if ( cfg_proxy_auth_password_socks != NULL )
-			{
-				GlobalFree( cfg_proxy_auth_password_socks );
-			}
-			cfg_proxy_auth_password_socks = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * auth_length );
-			_SendMessageW( g_hWnd_auth_password_socks, WM_GETTEXT, auth_length, ( LPARAM )cfg_proxy_auth_password_socks );
-
-			if ( normaliz_state == NORMALIZ_STATE_RUNNING )
-			{
-				if ( cfg_address_type_socks == 0 )
-				{
-					if ( g_punycode_hostname_socks != NULL )
-					{
-						GlobalFree( g_punycode_hostname_socks );
-						g_punycode_hostname_socks = NULL;
-					}
-
-					int punycode_length = _IdnToAscii( 0, cfg_hostname_socks, hostname_length, NULL, 0 );
-
-					if ( punycode_length > ( int )hostname_length )
-					{
-						g_punycode_hostname_socks = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * punycode_length );
-						_IdnToAscii( 0, cfg_hostname_socks, hostname_length, g_punycode_hostname_socks, punycode_length );
-					}
-				}
-			}
-
-			//
-
-			int auth_username_length = 0, auth_password_length = 0;
-
-			g_proxy_auth_key_length = 0;
-			if ( g_proxy_auth_key != NULL )
-			{
-				GlobalFree( g_proxy_auth_key );
-				g_proxy_auth_key = NULL;
-			}
-
-			if ( cfg_proxy_auth_username != NULL && cfg_proxy_auth_password != NULL )
-			{
-				if ( g_proxy_auth_username != NULL )
-				{
-					GlobalFree( g_proxy_auth_username );
-				}
-				auth_username_length = WideCharToMultiByte( CP_UTF8, 0, cfg_proxy_auth_username, -1, NULL, 0, NULL, NULL );
-				g_proxy_auth_username = ( char * )GlobalAlloc( GMEM_FIXED, sizeof( char ) * auth_username_length ); // Size includes the null character.
-				auth_username_length = WideCharToMultiByte( CP_UTF8, 0, cfg_proxy_auth_username, -1, g_proxy_auth_username, auth_username_length, NULL, NULL ) - 1;
-
-				if ( g_proxy_auth_password != NULL )
-				{
-					GlobalFree( g_proxy_auth_password );
-				}
-				auth_password_length = WideCharToMultiByte( CP_UTF8, 0, cfg_proxy_auth_password, -1, NULL, 0, NULL, NULL );
-				g_proxy_auth_password = ( char * )GlobalAlloc( GMEM_FIXED, sizeof( char ) * auth_password_length ); // Size includes the null character.
-				auth_password_length = WideCharToMultiByte( CP_UTF8, 0, cfg_proxy_auth_password, -1, g_proxy_auth_password, auth_password_length, NULL, NULL ) - 1;
-
-				CreateBasicAuthorizationKey( g_proxy_auth_username, auth_username_length, g_proxy_auth_password, auth_password_length, &g_proxy_auth_key, &g_proxy_auth_key_length );
-			}
-
-			g_proxy_auth_key_length_s = 0;
-			if ( g_proxy_auth_key_s != NULL )
-			{
-				GlobalFree( g_proxy_auth_key_s );
-				g_proxy_auth_key_s = NULL;
-			}
-
-			if ( cfg_proxy_auth_username_s != NULL && cfg_proxy_auth_password_s != NULL )
-			{
-				if ( g_proxy_auth_username_s != NULL )
-				{
-					GlobalFree( g_proxy_auth_username_s );
-				}
-				auth_username_length = WideCharToMultiByte( CP_UTF8, 0, cfg_proxy_auth_username_s, -1, NULL, 0, NULL, NULL );
-				g_proxy_auth_username_s = ( char * )GlobalAlloc( GMEM_FIXED, sizeof( char ) * auth_username_length ); // Size includes the null character.
-				auth_username_length = WideCharToMultiByte( CP_UTF8, 0, cfg_proxy_auth_username_s, -1, g_proxy_auth_username_s, auth_username_length, NULL, NULL ) - 1;
-
-				if ( g_proxy_auth_password_s != NULL )
-				{
-					GlobalFree( g_proxy_auth_password_s );
-				}
-				auth_password_length = WideCharToMultiByte( CP_UTF8, 0, cfg_proxy_auth_password_s, -1, NULL, 0, NULL, NULL );
-				g_proxy_auth_password_s = ( char * )GlobalAlloc( GMEM_FIXED, sizeof( char ) * auth_password_length ); // Size includes the null character.
-				auth_password_length = WideCharToMultiByte( CP_UTF8, 0, cfg_proxy_auth_password_s, -1, g_proxy_auth_password_s, auth_password_length, NULL, NULL ) - 1;
-
-				CreateBasicAuthorizationKey( g_proxy_auth_username_s, auth_username_length, g_proxy_auth_password_s, auth_password_length, &g_proxy_auth_key_s, &g_proxy_auth_key_length_s );
-			}
-
-			if ( cfg_proxy_auth_username_socks != NULL )
-			{
-				if ( g_proxy_auth_username_socks != NULL )
-				{
-					GlobalFree( g_proxy_auth_username_socks );
-				}
-				auth_username_length = WideCharToMultiByte( CP_UTF8, 0, cfg_proxy_auth_username_socks, -1, NULL, 0, NULL, NULL );
-				g_proxy_auth_username_socks = ( char * )GlobalAlloc( GMEM_FIXED, sizeof( char ) * auth_username_length ); // Size includes the null character.
-				auth_username_length = WideCharToMultiByte( CP_UTF8, 0, cfg_proxy_auth_username_socks, -1, g_proxy_auth_username_socks, auth_username_length, NULL, NULL ) - 1;
-			}
-
-			if ( cfg_proxy_auth_password_socks != NULL )
-			{
-				if ( g_proxy_auth_password_socks != NULL )
-				{
-					GlobalFree( g_proxy_auth_password_socks );
-				}
-				auth_password_length = WideCharToMultiByte( CP_UTF8, 0, cfg_proxy_auth_password_socks, -1, NULL, 0, NULL, NULL );
-				g_proxy_auth_password_socks = ( char * )GlobalAlloc( GMEM_FIXED, sizeof( char ) * auth_password_length ); // Size includes the null character.
-				auth_password_length = WideCharToMultiByte( CP_UTF8, 0, cfg_proxy_auth_password_socks, -1, g_proxy_auth_password_socks, auth_password_length, NULL, NULL ) - 1;
-			}
-
-			if ( cfg_proxy_auth_ident_username_socks != NULL )
-			{
-				if ( g_proxy_auth_ident_username_socks != NULL )
-				{
-					GlobalFree( g_proxy_auth_ident_username_socks );
-				}
-				auth_username_length = WideCharToMultiByte( CP_UTF8, 0, cfg_proxy_auth_ident_username_socks, -1, NULL, 0, NULL, NULL );
-				g_proxy_auth_ident_username_socks = ( char * )GlobalAlloc( GMEM_FIXED, sizeof( char ) * auth_username_length ); // Size includes the null character.
-				auth_username_length = WideCharToMultiByte( CP_UTF8, 0, cfg_proxy_auth_ident_username_socks, -1, g_proxy_auth_ident_username_socks, auth_username_length, NULL, NULL ) - 1;
-			}
+			// The list file and the selection are persisted as changes happen; make sure
+			// everything is consistent when the options dialog is saved.
+			SaveProxyList();
 
 			return 0;
 		}
@@ -1257,15 +974,12 @@ LRESULT CALLBACK ProxyTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 
 		case WM_DESTROY:
 		{
-			_DeleteObject( hFont_copy_proxy );
-			hFont_copy_proxy = NULL;
-
-#ifdef ENABLE_DARK_MODE
-			if ( g_use_dark_mode )
-			{
-				CleanupButtonGlyphs( hWnd );
-			}
-#endif
+			g_hWnd_proxy_list = NULL;
+			g_hWnd_btn_proxy_add = NULL;
+			g_hWnd_btn_proxy_edit = NULL;
+			g_hWnd_btn_proxy_remove = NULL;
+			g_hWnd_combo_proxy_select = NULL;
+			g_hWnd_static_proxy_select = NULL;
 
 			return 0;
 		}
@@ -1277,5 +991,6 @@ LRESULT CALLBACK ProxyTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 		}
 		break;
 	}
-	//return TRUE;
+
+	return TRUE;
 }

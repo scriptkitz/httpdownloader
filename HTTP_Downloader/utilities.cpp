@@ -20,7 +20,11 @@
 #include "utilities.h"
 #include "string_tables.h"
 
+#include "connection.h"
+#include "doublylinkedlist.h"
+
 #include "lite_gdi32.h"
+#include "lite_normaliz.h"
 
 #include "treelistview.h"
 
@@ -216,6 +220,159 @@ unsigned char cfg_address_type = 0;			// 0 = Host name, 1 = IP address
 unsigned long cfg_ip_address = 2130706433;	// 127.0.0.1
 wchar_t *cfg_hostname = NULL;
 unsigned short cfg_port = 80;
+
+// Proxy list (Options -> Proxy page).
+DoublyLinkedList *g_proxy_list = NULL;
+PROXY_ENTRY *g_active_proxy = NULL;
+unsigned char cfg_selected_proxy = 0;		// 0 = no proxy, else 1-based index into g_proxy_list.
+
+PROXY_ENTRY *GetActiveProxyForProtocol( unsigned char protocol )
+{
+	if ( g_active_proxy == NULL )
+	{
+		return NULL;
+	}
+
+	switch ( g_active_proxy->type )
+	{
+		case PROXY_TYPE_HTTP:
+		{
+			// An HTTP proxy also serves HTTPS through CONNECT tunneling.
+			return ( protocol == PROTOCOL_HTTP || protocol == PROTOCOL_HTTPS ? g_active_proxy : NULL );
+		}
+		break;
+
+		case PROXY_TYPE_HTTPS:
+		{
+			return ( protocol == PROTOCOL_HTTPS ? g_active_proxy : NULL );
+		}
+		break;
+
+		case PROXY_TYPE_SOCKS4:
+		case PROXY_TYPE_SOCKS5:
+		{
+			// A SOCKS proxy serves all protocols.
+			return g_active_proxy;
+		}
+		break;
+
+		default:
+		{
+			return NULL;
+		}
+		break;
+	}
+}
+
+void FreeProxyEntry( PROXY_ENTRY *pe )
+{
+	if ( pe == NULL )
+	{
+		return;
+	}
+
+	GlobalFree( pe->alias );
+	GlobalFree( pe->hostname );
+	GlobalFree( pe->punycode_hostname );
+	GlobalFree( pe->username );
+	GlobalFree( pe->password );
+	GlobalFree( pe->ident_username );
+
+	GlobalFree( pe->auth_username_utf8 );
+	GlobalFree( pe->auth_password_utf8 );
+	GlobalFree( pe->ident_username_utf8 );
+	GlobalFree( pe->auth_key );
+
+	GlobalFree( pe );
+}
+
+void UpdateActiveProxyRuntimeFields( void )
+{
+	if ( g_active_proxy == NULL )
+	{
+		return;
+	}
+
+	PROXY_ENTRY *pe = g_active_proxy;
+
+	// Punycode hostname (IDN).
+	GlobalFree( pe->punycode_hostname );
+	pe->punycode_hostname = NULL;
+
+	if ( pe->address_type == 0 && pe->hostname != NULL && normaliz_state == NORMALIZ_STATE_RUNNING )
+	{
+		int hostname_length = lstrlenW( pe->hostname ) + 1;	// Include the NULL terminator.
+		int punycode_length = _IdnToAscii( 0, pe->hostname, hostname_length, NULL, 0 );
+
+		if ( punycode_length > hostname_length )
+		{
+			pe->punycode_hostname = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * punycode_length );
+			_IdnToAscii( 0, pe->hostname, hostname_length, pe->punycode_hostname, punycode_length );
+		}
+	}
+
+	// UTF-8 credentials and Basic auth key (always non-NULL, empty strings when unused).
+	GlobalFree( pe->auth_username_utf8 );
+	GlobalFree( pe->auth_password_utf8 );
+	GlobalFree( pe->ident_username_utf8 );
+	GlobalFree( pe->auth_key );
+
+	pe->auth_username_utf8 = NULL;
+	pe->auth_password_utf8 = NULL;
+	pe->ident_username_utf8 = NULL;
+	pe->auth_key = NULL;
+	pe->auth_key_length = 0;
+
+	if ( pe->username != NULL )
+	{
+		int username_length = WideCharToMultiByte( CP_UTF8, 0, pe->username, -1, NULL, 0, NULL, NULL );
+		pe->auth_username_utf8 = ( char * )GlobalAlloc( GMEM_FIXED, sizeof( char ) * username_length );	// Includes the NULL terminator.
+		WideCharToMultiByte( CP_UTF8, 0, pe->username, -1, pe->auth_username_utf8, username_length, NULL, NULL );
+	}
+
+	if ( pe->password != NULL )
+	{
+		int password_length = WideCharToMultiByte( CP_UTF8, 0, pe->password, -1, NULL, 0, NULL, NULL );
+		pe->auth_password_utf8 = ( char * )GlobalAlloc( GMEM_FIXED, sizeof( char ) * password_length );
+		WideCharToMultiByte( CP_UTF8, 0, pe->password, -1, pe->auth_password_utf8, password_length, NULL, NULL );
+	}
+
+	if ( pe->ident_username != NULL )
+	{
+		int ident_length = WideCharToMultiByte( CP_UTF8, 0, pe->ident_username, -1, NULL, 0, NULL, NULL );
+		pe->ident_username_utf8 = ( char * )GlobalAlloc( GMEM_FIXED, sizeof( char ) * ident_length );
+		WideCharToMultiByte( CP_UTF8, 0, pe->ident_username, -1, pe->ident_username_utf8, ident_length, NULL, NULL );
+	}
+
+	if ( pe->auth_username_utf8 != NULL || pe->auth_password_utf8 != NULL )
+	{
+		int username_length = ( pe->auth_username_utf8 != NULL ? lstrlenA( pe->auth_username_utf8 ) : 0 );
+		int password_length = ( pe->auth_password_utf8 != NULL ? lstrlenA( pe->auth_password_utf8 ) : 0 );
+
+		CreateBasicAuthorizationKey( ( pe->auth_username_utf8 != NULL ? pe->auth_username_utf8 : "" ), username_length,
+									( pe->auth_password_utf8 != NULL ? pe->auth_password_utf8 : "" ), password_length,
+									&pe->auth_key, &pe->auth_key_length );
+	}
+}
+
+void CleanupProxyList( void )
+{
+	DoublyLinkedList *node = g_proxy_list;
+
+	while ( node != NULL )
+	{
+		DoublyLinkedList *next = node->next;
+
+		FreeProxyEntry( ( PROXY_ENTRY * )node->data );
+
+		GlobalFree( node );
+
+		node = next;
+	}
+
+	g_proxy_list = NULL;
+	g_active_proxy = NULL;
+}
 
 wchar_t *cfg_proxy_auth_username = NULL;
 wchar_t *cfg_proxy_auth_password = NULL;
@@ -748,6 +905,14 @@ HFONT UpdateFont( UINT dpi )
 	_memzero( &ncm, sizeof( NONCLIENTMETRICS ) );
 	ncm.cbSize = sizeof( NONCLIENTMETRICS );
 	__SystemParametersInfoForDpi( SPI_GETNONCLIENTMETRICS, sizeof( NONCLIENTMETRICS ), &ncm, 0, dpi );
+
+	// DefaultQuality (0) makes themed controls (checkbox/radio buttons) render their text
+	// with grayscale antialiasing instead of ClearType, which looks bold and black. Ask for
+	// ClearType explicitly. Windows ignores this when font smoothing is disabled system-wide.
+	if ( ncm.lfMessageFont.lfQuality == DEFAULT_QUALITY )
+	{
+		ncm.lfMessageFont.lfQuality = CLEARTYPE_QUALITY;
+	}
 
 	return _CreateFontIndirectW( &ncm.lfMessageFont );
 }
@@ -2344,8 +2509,10 @@ void ConstructRequest( SOCKET_CONTEXT *context, bool use_connect )
 
 	AdjustConstructBufferSize( context, request_length, context->request_info.host );
 
-	char use_http_proxy =  ( cfg_enable_proxy ? 1 : 0 );
-	char use_https_proxy = ( cfg_enable_proxy_s ? 1 : 0 );
+	// The active proxy from the proxy list (Options -> Proxy). 1 = global proxy, 2 = per-task proxy.
+	PROXY_ENTRY *active_proxy = GetActiveProxyForProtocol( context->request_info.protocol );
+	char use_http_proxy = ( active_proxy != NULL && active_proxy->type == PROXY_TYPE_HTTP ? 1 : 0 );
+	char use_https_proxy = ( active_proxy != NULL && active_proxy->type == PROXY_TYPE_HTTPS ? 1 : 0 );
 
 	PROXY_INFO *pi = NULL;
 
@@ -2594,11 +2761,15 @@ void ConstructRequest( SOCKET_CONTEXT *context, bool use_connect )
 		}
 		else
 		{
-			proxy_auth_key = g_proxy_auth_key;
-			proxy_auth_key_length = g_proxy_auth_key_length;
+			PROXY_ENTRY *active_proxy = GetActiveProxyForProtocol( context->request_info.protocol );
+			if ( active_proxy != NULL )
+			{
+				proxy_auth_key = active_proxy->auth_key;
+				proxy_auth_key_length = active_proxy->auth_key_length;
 
-			proxy_auth_username = g_proxy_auth_username;
-			proxy_auth_password = g_proxy_auth_password;
+				proxy_auth_username = active_proxy->auth_username_utf8;
+				proxy_auth_password = active_proxy->auth_password_utf8;
+			}
 		}
 	}
 	else if ( use_https_proxy && context->request_info.protocol == PROTOCOL_HTTPS )
@@ -2613,11 +2784,15 @@ void ConstructRequest( SOCKET_CONTEXT *context, bool use_connect )
 		}
 		else
 		{
-			proxy_auth_key = g_proxy_auth_key_s;
-			proxy_auth_key_length = g_proxy_auth_key_length_s;
+			PROXY_ENTRY *active_proxy = GetActiveProxyForProtocol( context->request_info.protocol );
+			if ( active_proxy != NULL )
+			{
+				proxy_auth_key = active_proxy->auth_key;
+				proxy_auth_key_length = active_proxy->auth_key_length;
 
-			proxy_auth_username = g_proxy_auth_username_s;
-			proxy_auth_password = g_proxy_auth_password_s;
+				proxy_auth_username = active_proxy->auth_username_utf8;
+				proxy_auth_password = active_proxy->auth_password_utf8;
+			}
 		}
 	}
 
@@ -2750,21 +2925,26 @@ void ConstructSOCKSRequest( SOCKET_CONTEXT *context, unsigned char request_type 
 
 	if ( _socks_type == -1 )
 	{
-		_socks_type = cfg_socks_type;
-
-		if ( cfg_socks_type == SOCKS_TYPE_V4 )
+		// The active proxy from the proxy list (Options -> Proxy).
+		PROXY_ENTRY *active_proxy = GetActiveProxyForProtocol( context->request_info.protocol );
+		if ( active_proxy != NULL && ( active_proxy->type == PROXY_TYPE_SOCKS4 || active_proxy->type == PROXY_TYPE_SOCKS5 ) )
 		{
-			_resolve_domain_names = cfg_resolve_domain_names_v4a;
+			if ( active_proxy->type == PROXY_TYPE_SOCKS4 )
+			{
+				_socks_type = SOCKS_TYPE_V4;
+				_resolve_domain_names = active_proxy->resolve_domain_names;
 
-			proxy_auth_username = g_proxy_auth_ident_username_socks;
-		}
-		else if ( cfg_socks_type == SOCKS_TYPE_V5 )
-		{
-			_resolve_domain_names = cfg_resolve_domain_names;
-			_use_authentication = cfg_use_authentication_socks;
+				proxy_auth_username = active_proxy->ident_username_utf8;
+			}
+			else
+			{
+				_socks_type = SOCKS_TYPE_V5;
+				_resolve_domain_names = active_proxy->resolve_domain_names;
+				_use_authentication = active_proxy->use_authentication;
 
-			proxy_auth_username = g_proxy_auth_username_socks;
-			proxy_auth_password = g_proxy_auth_password_socks;
+				proxy_auth_username = active_proxy->auth_username_utf8;
+				proxy_auth_password = active_proxy->auth_password_utf8;
+			}
 		}
 	}
 

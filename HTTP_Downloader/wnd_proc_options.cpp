@@ -415,9 +415,15 @@ LRESULT CALLBACK OptionsWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
 			current_dpi_options = HIWORD( wParam );
 
 			HFONT hFont = UpdateFont( current_dpi_options );
-			EnumChildWindows( hWnd, EnumChildFontProc, ( LPARAM )hFont );
-			_DeleteObject( hFont_options );
-			hFont_options = hFont;
+
+			// Never replace a working font with a failed creation: a NULL font would make
+			// every control fall back to the default GUI font (bold/black, no ClearType).
+			if ( hFont != NULL )
+			{
+				EnumChildWindows( hWnd, EnumChildFontProc, ( LPARAM )hFont );
+				_DeleteObject( hFont_options );
+				hFont_options = hFont;
+			}
 
 			RECT *rc = ( RECT * )lParam;
 			int width = rc->right - rc->left;
@@ -606,6 +612,7 @@ LRESULT CALLBACK OptionsWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
 		{
 			// Delete our font.
 			_DeleteObject( hFont_options );
+			hFont_options = NULL;
 
 			g_hWnd_appearance_tab = NULL;
 			g_hWnd_connection_tab = NULL;

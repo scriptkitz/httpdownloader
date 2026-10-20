@@ -19,7 +19,7 @@
 #ifndef _FILE_OPERATIONS_H
 #define _FILE_OPERATIONS_H
 
-#define MAGIC_ID_SETTINGS			"HDM\x09"	// Version 10
+#define MAGIC_ID_SETTINGS			"HDM\x0A"	// Version 11 (0x0A adds cfg_selected_proxy to the fixed layout).
 #define MAGIC_ID_DOWNLOADS			"HDM\x18"	// Version 9
 #define MAGIC_ID_SITES				"HDM\x23"	// Version 4
 #define MAGIC_ID_SFTP_HOSTS			"HDM\x30"	// Version 1
@@ -28,6 +28,10 @@
 
 char read_config();
 char save_config();
+
+char ReadProxyList( void );
+char SaveProxyList( void );
+void MigrateLegacyProxyConfig( void );
 
 char read_download_history( wchar_t *file_path, bool scroll_to_last_item = false );
 char save_download_history( wchar_t *file_path );

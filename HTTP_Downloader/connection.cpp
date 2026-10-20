@@ -2662,14 +2662,18 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								LeaveCriticalSection( &context->download_info->shared_info->di_cs );
 							}
 
-							if ( cfg_enable_proxy_s ||
+							PROXY_ENTRY *active_proxy = GetActiveProxyForProtocol( context->request_info.protocol );
+
+							if ( ( active_proxy != NULL && active_proxy->type == PROXY_TYPE_HTTPS ) ||
 							   ( context->download_info->proxy_info != NULL &&
 								 context->download_info->proxy_info->type == 2 ) )
 							{
 								use_https_proxy = true;
 							}
 
-							if ( cfg_enable_proxy_socks ||
+							if ( ( active_proxy != NULL &&
+								 ( active_proxy->type == PROXY_TYPE_SOCKS4 ||
+								   active_proxy->type == PROXY_TYPE_SOCKS5 ) ) ||
 							   ( context->download_info->proxy_info != NULL &&
 							   ( context->download_info->proxy_info->type == 3 ||
 								 context->download_info->proxy_info->type == 4 ) ) )
@@ -3619,7 +3623,9 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							}
 							else if ( context->wsabuf.buf[ 1 ] == 0x02 )	// SOCKS5 - username and password authentication required.
 							{
-								if ( cfg_use_authentication_socks )
+								PROXY_ENTRY *active_proxy = GetActiveProxyForProtocol( context->request_info.protocol );
+
+								if ( active_proxy != NULL && active_proxy->use_authentication )
 								{
 									context->content_status = SOCKS_STATUS_AUTH_SENT;
 
@@ -4720,9 +4726,19 @@ bool CreateConnection( SOCKET_CONTEXT *context, char *host, unsigned short port 
 	}
 	else
 	{
-		_enable_proxy_socks = cfg_enable_proxy_socks;
-		_socks_type = cfg_socks_type;
-		_resolve_domain_names = cfg_resolve_domain_names;
+		// The active proxy from the proxy list (Options -> Proxy). Per-task proxy info (above)
+		// takes precedence.
+		PROXY_ENTRY *active_proxy = GetActiveProxyForProtocol( context->request_info.protocol );
+		if ( active_proxy != NULL && ( active_proxy->type == PROXY_TYPE_SOCKS4 || active_proxy->type == PROXY_TYPE_SOCKS5 ) )
+		{
+			_enable_proxy_socks = true;
+			_socks_type = ( active_proxy->type == PROXY_TYPE_SOCKS5 ? SOCKS_TYPE_V5 : SOCKS_TYPE_V4 );
+			_resolve_domain_names = active_proxy->resolve_domain_names;
+		}
+		else
+		{
+			_enable_proxy_socks = false;
+		}
 	}
 
 	if ( context->address_info == NULL )
@@ -4751,36 +4767,23 @@ bool CreateConnection( SOCKET_CONTEXT *context, char *host, unsigned short port 
 
 			_address_type = pi->address_type;
 		}
-		else if ( cfg_enable_proxy && context->request_info.protocol == PROTOCOL_HTTP )
-		{
-			_hostname = cfg_hostname;
-			_punycode_hostname = g_punycode_hostname;
-			_ip_address = cfg_ip_address;
-			port = cfg_port;
-
-			_address_type = cfg_address_type;
-		}
-		else if ( cfg_enable_proxy_s && context->request_info.protocol == PROTOCOL_HTTPS )
-		{
-			_hostname = cfg_hostname_s;
-			_punycode_hostname = g_punycode_hostname_s;
-			_ip_address = cfg_ip_address_s;
-			port = cfg_port_s;
-
-			_address_type = cfg_address_type_s;
-		}
-		else if ( cfg_enable_proxy_socks )
-		{
-			_hostname = cfg_hostname_socks;
-			_punycode_hostname = g_punycode_hostname_socks;
-			_ip_address = cfg_ip_address_socks;
-			port = cfg_port_socks;
-
-			_address_type = cfg_address_type_socks;
-		}
 		else
 		{
-			use_supplied_params = true;
+			// The active proxy from the proxy list (Options -> Proxy).
+			PROXY_ENTRY *active_proxy = GetActiveProxyForProtocol( context->request_info.protocol );
+			if ( active_proxy != NULL )
+			{
+				_hostname = active_proxy->hostname;
+				_punycode_hostname = active_proxy->punycode_hostname;
+				_ip_address = active_proxy->ip_address;
+				port = active_proxy->port;
+
+				_address_type = active_proxy->address_type;
+			}
+			else
+			{
+				use_supplied_params = true;
+			}
 		}
 
 		__snwprintf( wport, 6, L"%hu", port );
