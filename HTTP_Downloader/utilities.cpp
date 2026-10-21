@@ -136,7 +136,7 @@ unsigned long g_max_threads = 2;	// Default is 2.
 unsigned char cfg_max_downloads = 10;
 
 unsigned char cfg_retry_downloads_count = 2;
-unsigned char cfg_retry_parts_count = 0;
+unsigned char cfg_retry_parts_count = 3;	// Retry a part whose connection was closed without making progress.
 
 unsigned char cfg_default_ssl_version = 4;	// Default is TLS 1.2.
 unsigned char cfg_default_download_parts = 1;

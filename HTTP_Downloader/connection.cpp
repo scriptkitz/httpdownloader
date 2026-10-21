@@ -5807,8 +5807,14 @@ void StartDownload( DOWNLOAD_INFO *di, unsigned char start_type, unsigned char s
 		// Check if our range still needs to download.
 		if ( ( ri != NULL && ( ri->content_offset < ( ( ri->range_end - ri->range_start ) + 1 ) ) ) || finish_cleanup )
 		{
-			// Split the remaining range_list off into the range_queue.
-			if ( di->parts_limit > 0 && part > di->parts_limit )
+			// Never open more connections than the download's part target. The range list can
+			// legitimately hold more ranges than parts (every dynamic split adds one, and the
+			// list is only re-normalized when the incomplete range count is below the part
+			// count), so the old "only cap when parts_limit is set" test let a long, flaky
+			// download suddenly spawn one connection per range (observed 100+ active parts).
+			// The extra ranges stay queued and are picked up by the wind-down path as parts finish.
+			unsigned short start_target = GetDynamicPartsTarget( di );
+			if ( start_target > 0 && part > start_target )
 			{
 				di->range_queue = range_node;
 
@@ -6095,6 +6101,13 @@ void StartDownload( DOWNLOAD_INFO *di, unsigned char start_type, unsigned char s
 
 		range_node = range_node->next;
 	}
+
+#ifdef ENABLE_LOGGING
+	WriteLog( LOG_INFO_CON_STATE, "[START] active_parts=%u parts=%u target=%u parts_limit=%u queued=%d",
+		(unsigned int)di->active_parts, (unsigned int)di->parts,
+		(unsigned int)GetDynamicPartsTarget( di ), (unsigned int)di->parts_limit,
+		( di->range_queue != NULL ? 1 : 0 ) );
+#endif
 
 	//LeaveCriticalSection( &cleanup_cs );
 
@@ -9735,15 +9748,54 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 				// Don't retry the download if we're verifying it.
 				bool verifying_download = ( di->shared_info->download_operations & DOWNLOAD_OPERATION_VERIFY ? true : false );
 
+				// A transfer that the server cut short is resumable as long as this attempt
+				// actually stored some data. CDNs routinely reset part connections mid-stream;
+				// abandoning the part there made the whole download end as "Stopped" (leaving a
+				// silently truncated, full-size file) even though one more request would have
+				// finished it. Resuming is bounded: the absolute position only ever moves
+				// forward, so each retry must make progress and the part terminates. An attempt
+				// that made no progress at all still consumes the configured "Retry incomplete
+				// parts" budget.
+				//
+				// The absolute position is range_start + content_offset because the retry path
+				// below folds content_offset into range_start and resets the counter.
+				unsigned long long part_position = ( context->header_info.range_info != NULL ?
+					( context->header_info.range_info->range_start + context->header_info.range_info->content_offset ) : 0 );
+
+				// resume_offset == 0 means no attempt has finished yet for this part: the
+				// baseline is then the range's start position, so an attempt that wrote nothing
+				// is still correctly reported as "no progress".
+				unsigned long long part_baseline = context->resume_offset;
+
+				if ( part_baseline == 0 && context->header_info.range_info != NULL )
+				{
+					part_baseline = context->header_info.range_info->range_start;
+				}
+
+				bool resumable_part = ( incomplete_part && context->processed_header && part_position > part_baseline );
+
 				// Connecting, Downloading, Paused.
 				if ( !verifying_download &&
 					  incomplete_part &&
-					  context->retries < cfg_retry_parts_count &&
+				    ( resumable_part || context->retries < cfg_retry_parts_count ) &&
 				    ( IS_STATUS( context->status,
 						 STATUS_CONNECTING |
 						 STATUS_DOWNLOADING ) ) )
 				{
-					++context->retries;
+					if ( !resumable_part )
+					{
+						++context->retries;
+					}
+
+					context->resume_offset = part_position;
+
+#ifdef ENABLE_LOGGING
+					WriteLog( LOG_INFO_CON_STATE,
+						"[RESUME-PART] ctx=%p part=%u pos=%llu progress=%d retries=%u/%u status=%08x",
+						(void *)context, (unsigned int)context->part, part_position,
+						( resumable_part ? 1 : 0 ), (unsigned int)context->retries,
+						(unsigned int)cfg_retry_parts_count, context->status );
+#endif
 
 					if ( context->socket != INVALID_SOCKET )
 					{
@@ -9856,6 +9908,7 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 							di->range_queue = di->range_queue->next;
 
 							context->retries = 0;
+							context->resume_offset = 0;	// New range, new resume baseline.
 
 							if ( context->socket != INVALID_SOCKET )
 							{

@@ -391,6 +391,11 @@ struct SOCKET_CONTEXT
 
 	unsigned char		retries;			// The number of times a context connection has been retried.
 
+	unsigned long long	resume_offset;		// range_info->content_offset when the current attempt
+											// started. A connection that dies mid-transfer is
+											// re-requested from here as long as the next attempt
+											// gets past it (see CleanupConnection).
+
 	unsigned char		timed_out;
 
 	unsigned char		cleanup;			// In cleanup function, or in worker thread doing/calling cleanup.
