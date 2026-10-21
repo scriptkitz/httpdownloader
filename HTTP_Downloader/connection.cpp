@@ -2162,7 +2162,15 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 			continue;
 		}
 
-		InterlockedExchange( &context->timeout, 0 );	// Reset timeout counter.
+		// Reset the connection timeout on real IO activity only. IO_Reallocate is an internal
+		// request posted by the timeout thread itself (dynamic part re-splitting); counting it as
+		// activity made the counter restart every second while active_parts < target, so a truly
+		// stalled connection (server accepted the request but never sends the body) was never
+		// given up on and the download sat at e.g. 99% forever.
+		if ( *current_operation != IO_Reallocate )
+		{
+			InterlockedExchange( &context->timeout, 0 );	// Reset timeout counter.
+		}
 
 		use_ssl = ( context->_ssl_s != NULL || context->_ssl_o != NULL ? true : false );
 
@@ -9278,6 +9286,17 @@ void SplitLargestPart( DOWNLOAD_INFO *di )
 	}
 
 	EnterCriticalSection( &di->di_cs );
+
+	// Re-check under the lock. Callers check "active_parts < target" before requesting a split,
+	// but several IO_Reallocate completions can pass that (unlocked) check at the same time and
+	// each create a part, which pushed active_parts above the configured count (observed 51 for a
+	// 50 part download). Keeping the check atomic with the increment makes parts/target a real cap.
+	if ( di->parts <= 1 || di->active_parts >= GetDynamicPartsTarget( di ) )
+	{
+		LeaveCriticalSection( &di->di_cs );
+
+		return;
+	}
 
 	// Find the context with the largest remaining part.
 	DoublyLinkedList *parts_list = di->parts_list;

@@ -405,7 +405,7 @@ wchar_t *cfg_proxy_auth_ident_username_socks = NULL;
 
 //
 
-unsigned short cfg_timeout = 60;
+unsigned short cfg_timeout = 20;
 
 //
 

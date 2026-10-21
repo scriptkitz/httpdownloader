@@ -1099,7 +1099,7 @@ RETRY_OPEN:
 
 							if ( cfg_retry_downloads_count > 100 ) { cfg_retry_downloads_count = 100; }
 							if ( cfg_retry_parts_count > 100 ) { cfg_retry_parts_count = 100; }
-							if ( cfg_timeout > 300 || ( cfg_timeout > 0 && cfg_timeout < 10 ) ) { cfg_timeout = 60; }
+							if ( cfg_timeout > 300 || ( cfg_timeout > 0 && cfg_timeout < 10 ) ) { cfg_timeout = 20; }
 
 							if ( cfg_default_download_parts > 100 )
 							{
