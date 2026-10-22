@@ -269,6 +269,7 @@ void RecalculateDownloaded( DOWNLOAD_INFO *di )
 	// reported as e.g. 76% on a completed download). The remaining amount of every range is
 	// always accurate, so: downloaded = file_size - remaining.
 	unsigned long long remaining = 0;
+	unsigned long long covered = 0;
 
 	DoublyLinkedList *range_node = di->range_list;
 	while ( range_node != NULL && range_node != di->range_list_end )
@@ -280,6 +281,7 @@ void RecalculateDownloaded( DOWNLOAD_INFO *di )
 			unsigned long long range_done = ( ri->content_offset <= range_length ? ri->content_offset : range_length );
 
 			remaining += ( range_length - range_done );
+			covered += range_length;
 		}
 
 		range_node = range_node->next;
@@ -292,12 +294,42 @@ void RecalculateDownloaded( DOWNLOAD_INFO *di )
 		return;
 	}
 
+	// The ranges must cover the whole file before "file_size - remaining" means anything.
+	// Before the header is split into parts the list still holds the 1-byte probe range,
+	// and deriving the counter from it would report ~100% for an empty download.
+	if ( covered < di->file_size )
+	{
+		return;
+	}
+
 	unsigned long long downloaded = di->file_size - remaining;
 
+	// NOTE: last_downloaded is intentionally left alone. The main timer calls this every
+	// second before sampling the speed, and comparing against the corrected value is what
+	// keeps the speed honest (the sampler clamps a negative delta to zero).
 	di->downloaded = downloaded;
+}
 
-	// Keep the speed sampler from reporting a bogus spike after the correction.
-	di->last_downloaded = downloaded;
+// Clamp a range's progress to its own length.
+//
+// The write completion counts the bytes that were RECEIVED, not the bytes the range can
+// hold. When the server ignores our Range header (or a resumed request re-delivers a
+// region), content_offset grows past range_end. The retry path then does
+//   range_start += content_offset;
+// and asks for a range that starts beyond the end of the file, which the server answers
+// with 416 (Range Not Satisfiable) - terminal for that part, and since every other part is
+// already done the whole download ends as "Failed - HTTP 416".
+void ClampRangeProgress( RANGE_INFO *ri )
+{
+	if ( ri != NULL && ri->range_end >= ri->range_start )
+	{
+		unsigned long long range_length = ( ri->range_end - ri->range_start ) + 1;
+
+		if ( ri->content_offset > range_length )
+		{
+			ri->content_offset = range_length;
+		}
+	}
 }
 
 unsigned short CountActiveParts( DOWNLOAD_INFO *di )
@@ -1615,7 +1647,23 @@ THREAD_RETURN PromptRenameFile( void *pArguments )
 					GetDownloadFilePath( di, file_path );
 				}
 
-				if ( rename_only == 0 )
+				DOWNLOAD_INFO *shared_info = di->shared_info;
+
+				// A download owns exactly one destination file, so one answer has to cover every
+				// part. Without this each queued context prompted again, and choosing "Rename"
+				// ran RenameFile() once per part, appending another " (n)" to the filename each
+				// time (file.zip -> file (1).zip -> file (1) (2).zip ...). "Skip" likewise had to
+				// be clicked once per part.
+				unsigned char previous_choice = 0;
+
+				EnterCriticalSection( &shared_info->di_cs );
+				previous_choice = shared_info->file_exists_choice;
+				LeaveCriticalSection( &shared_info->di_cs );
+
+				bool first_answer = ( previous_choice == 0 );
+				unsigned char choice = previous_choice;
+
+				if ( first_answer && rename_only == 0 )
 				{
 					// If the last return value was not set to remember our choice, then prompt again.
 					if ( g_rename_file_cmb_ret != CMBIDRENAMEALL && g_rename_file_cmb_ret != CMBIDOVERWRITEALL && g_rename_file_cmb_ret != CMBIDSKIPALL )
@@ -1626,8 +1674,20 @@ THREAD_RETURN PromptRenameFile( void *pArguments )
 					}
 				}
 
+				if ( first_answer )
+				{
+					// rename_only == 1 means this download is set to always rename (or the user
+					// picked "Rename All"), in which case no prompt was shown above.
+					choice = ( rename_only == 1 ? CMBIDRENAME : g_rename_file_cmb_ret );
+
+					// Remember the answer so the remaining parts of this download reuse it.
+					EnterCriticalSection( &shared_info->di_cs );
+					shared_info->file_exists_choice = choice;
+					LeaveCriticalSection( &shared_info->di_cs );
+				}
+
 				// Rename the file and try again.
-				if ( rename_only == 1 || g_rename_file_cmb_ret == CMBIDRENAME || g_rename_file_cmb_ret == CMBIDRENAMEALL )
+				if ( first_answer && ( choice == CMBIDRENAME || choice == CMBIDRENAMEALL ) )
 				{
 					// Creates a tree of active and queued downloads.
 					dllrbt_tree *add_files_tree = CreateFilenameTree();
@@ -1682,7 +1742,7 @@ THREAD_RETURN PromptRenameFile( void *pArguments )
 						PostQueuedCompletionStatus( g_hIOCP, context->current_bytes_read, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped );
 					}
 				}
-				else if ( g_rename_file_cmb_ret == CMBIDFAIL || g_rename_file_cmb_ret == CMBIDSKIP || g_rename_file_cmb_ret == CMBIDSKIPALL ) // Skip the rename or overwrite if the return value fails, or the user selected skip.
+				else if ( choice == CMBIDFAIL || choice == CMBIDSKIP || choice == CMBIDSKIPALL ) // Skip the rename or overwrite if the return value fails, or the user selected skip.
 				{
 					EnterCriticalSection( &context->context_cs );
 
@@ -4338,6 +4398,9 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 						context->header_info.range_info->content_offset += context->content_offset;	// The true amount that was downloaded. Allows us to resume if we stop the download.
 						context->content_offset = 0;
+
+						// Never let the progress of a range exceed the range itself.
+						ClampRangeProgress( context->header_info.range_info );
 
 						if ( context->ssh != NULL )
 						{
@@ -10050,6 +10113,13 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 
 							if ( incomplete_download )
 							{
+								// Report the final value from the ranges. The write-completion accumulator
+								// over-counts whenever a dropped connection forces a part to be re-fetched
+								// (the same bytes are written again), which is how a stopped download ended
+								// up displaying 107.6%.
+								RecalculateDownloaded( di );
+								di->last_downloaded = di->downloaded;
+
 								// Connecting, Downloading, Paused.
 								if ( IS_STATUS( context->status,
 										STATUS_CONNECTING |
@@ -10085,7 +10155,11 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 								// percentage (e.g. 76%) after completing.
 								RecalculateDownloaded( di );
 
-								if ( di->file_size != 0 && di->downloaded < di->file_size )
+								// A completed download has exactly file_size bytes, whatever the
+								// write-completion accumulator or a skipped recalculation left behind.
+								// (Re-fetched parts made both 'downloaded' and the displayed size
+								// column exceed the file size.)
+								if ( di->file_size != 0 )
 								{
 									di->downloaded = di->file_size;
 									di->last_downloaded = di->file_size;
@@ -10145,8 +10219,8 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 
 #ifdef ENABLE_LOGGING
 							// Permanent debug trace: final display values kept for the completed item.
-							WriteLog( LOG_INFO_CON_STATE, "[DONE] speed=%llu elapsed=%llu remaining=%llu | %S",
-								di->speed, di->time_elapsed, di->time_remaining, di->url );
+							WriteLog( LOG_INFO_CON_STATE, "[DONE] speed=%llu elapsed=%llu remaining=%llu shown=%llu/%llu | %S",
+								di->speed, di->time_elapsed, di->time_remaining, di->last_downloaded, di->file_size, di->url );
 #endif
 
 							// Stop and Remove.

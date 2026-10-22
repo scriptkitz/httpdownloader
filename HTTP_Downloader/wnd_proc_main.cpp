@@ -450,14 +450,26 @@ DWORD WINAPI UpdateWindow( LPVOID /*WorkThreadContext*/ )
 							// If downloading, then calculate the speed.
 							if ( di->status == STATUS_DOWNLOADING )
 							{
+								// Re-derive the byte counter from the ranges every tick. A part that is
+								// re-fetched after the server drops its connection is counted twice by
+								// the write-completion accumulator (the bytes are written again from a
+								// position that was already added to 'downloaded'), which pushed the
+								// percentage past 100% (observed 107.6%) and left it there when the
+								// download later stopped. The ranges are the authoritative source.
+								RecalculateDownloaded( di );
+
 								// Determine the difference (in milliseconds) between the current time and our last update time.
 								time_difference = ( current_time.ull - last_update.ull ) / ( FILETIME_TICKS_PER_SECOND / 1000 );	// Use milliseconds.
 
 								// See if at least 1 second has elapsed since we last updated our speed and download time estimate.
 								if ( time_difference >= 1000 )	// Measure in milliseconds for better precision. 1000 milliseconds = 1 second.
 								{
-									// Get the speed.
-									di->speed = ( ( di->downloaded - di->last_downloaded ) * 1000 ) / time_difference;	// Multiply by 1000 to match the millisecond precision. Gives us bytes/second.
+									// Get the speed. The counter can be corrected downwards above, so clamp
+									// the delta at zero instead of letting the unsigned subtraction wrap.
+									unsigned long long speed_delta = ( di->downloaded >= di->last_downloaded ?
+										( di->downloaded - di->last_downloaded ) : 0 );
+
+									di->speed = ( speed_delta * 1000 ) / time_difference;	// Multiply by 1000 to match the millisecond precision. Gives us bytes/second.
 
 									// Get the time remaining.
 									if ( di->speed > 0 )
@@ -1161,7 +1173,17 @@ wchar_t *GetDownloadInfoString( DOWNLOAD_INFO *di, int column, int root_index, i
 		{
 			buf = tbuf;	// Reset the buffer pointer.
 
-			FormatSizes( buf, tbuf_size, cfg_t_downloaded, ( IS_STATUS( di->status, STATUS_MOVING_FILE ) ? di->downloaded : di->last_downloaded ) );
+			unsigned long long shown_downloaded = ( IS_STATUS( di->status, STATUS_MOVING_FILE ) ? di->downloaded : di->last_downloaded );
+
+			// Never show more bytes than the file holds. The write-completion accumulator counts
+			// bytes that a retried part fetches again, so this column could read larger than the
+			// file size even after the download finished.
+			if ( di->file_size > 0 && shown_downloaded > di->file_size )
+			{
+				shown_downloaded = di->file_size;
+			}
+
+			FormatSizes( buf, tbuf_size, cfg_t_downloaded, shown_downloaded );
 		}
 		break;
 
@@ -1217,6 +1239,12 @@ wchar_t *GetDownloadInfoString( DOWNLOAD_INFO *di, int column, int root_index, i
 					fistp i_percentage;	//; Convert the floating point value into an integer, store it in an integer, and then pop it off the stack.
 				}
 #endif
+				// Never display more than 100% or a negative value. The byte counters are
+				// derived from the ranges once a second, so this is only a display guard for
+				// the moment between a correction and the next tick.
+				if ( i_percentage > 1000 ) { i_percentage = 1000; }
+				if ( i_percentage < 0 ) { i_percentage = 0; }
+
 				// Get the last digit (decimal value).
 				int remainder = i_percentage % 10;
 				// Divide the integer by (10%) to get it back in range of 0% to 100%.

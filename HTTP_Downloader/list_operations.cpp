@@ -4338,10 +4338,13 @@ THREAD_RETURN process_command_line_args( void *pArguments )
 						ai->proxy_info.address_type = 1;
 					}
 
-					if ( cla->proxy_port == 0 )
-					{
-						ai->proxy_info.port = ( cla->proxy_type == 1 ? 80 : ( cla->proxy_type == 2 ? 443 : 1080 ) );
-					}
+					// Use the port the command line asked for; only fall back to the protocol
+					// default when none was given. The original code assigned the default only
+					// in the "no port" case and never copied cla->proxy_port, so --proxy-port
+					// left the port at 0 and the connection failed instantly.
+					ai->proxy_info.port = ( cla->proxy_port != 0 ?
+						cla->proxy_port :
+						( cla->proxy_type == 1 ? 80 : ( cla->proxy_type == 2 ? 443 : 1080 ) ) );
 
 					if ( cla->proxy_username != NULL )
 					{

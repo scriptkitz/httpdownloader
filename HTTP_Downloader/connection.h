@@ -509,6 +509,12 @@ struct DOWNLOAD_INFO
 	unsigned char		hosts;
 	unsigned char		active_hosts;
 
+	unsigned char		file_exists_choice;	// Answer to the "file already exists" prompt for this
+											// download (CMBIDRENAME/OVERWRITE/SKIP...), 0 = not asked.
+											// A download owns exactly one destination file, so the
+											// answer covers every part: without it each part asked
+											// again and "Rename" appended another " (n)" to the name.
+
 	// --- Per-download speed-limit token bucket (shared by ALL parts/connections). ---
 	// Every part/connection of one download draws from this single bucket, so the effective
 	// throughput is genuinely limited to 'download_speed_limit' bytes/s regardless of how many
@@ -599,6 +605,11 @@ void RecalculateDownloaded( DOWNLOAD_INFO *di );
 // asynchronous cleanup can leave it higher than the number of real contexts (e.g. 20 for a 10
 // part download). The parts list is the authoritative record; use this to resync.
 unsigned short CountActiveParts( DOWNLOAD_INFO *di );
+
+// Clamps RANGE_INFO::content_offset to the length of its own range. Prevents a server that
+// ignores the Range header (or re-delivers a resumed region) from pushing the resume point
+// past the end of the range, which produced "HTTP 416" on the next request.
+void ClampRangeProgress( RANGE_INFO *ri );
 
 void AddToMoveFileQueue( DOWNLOAD_INFO *di );
 
