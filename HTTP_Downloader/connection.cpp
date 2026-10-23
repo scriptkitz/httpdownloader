@@ -5237,10 +5237,20 @@ void UpdateRangeList( DOWNLOAD_INFO *di )
 			unsigned short parts = di->parts / range_info_count;
 			unsigned short rem_parts = di->parts % range_info_count;
 
-			range_node = di->range_list;
+			// Build the split ranges into a NEW list and swap it in when done.
+			//
+			// The previous version reused the existing nodes in place, writing the subranges from
+			// the head of di->range_list while the sources were only the INCOMPLETE ranges. A single
+			// completed range in the middle shifted every subrange onto the wrong node, so on each
+			// restart the coverage no longer added up ("covered" collapsed from 455MB to 21MB and
+			// missing bytes GREW after every restart - reproduced with a server that refuses one
+			// byte window, which is what a rate limiting CDN does).
+			DoublyLinkedList *split_list = NULL;
+			bool split_ok = true;
+
 			range_node_copy = active_range_list;
 
-			while ( range_node_copy != NULL )
+			while ( range_node_copy != NULL && split_ok )
 			{
 				unsigned short t_parts = parts;
 
@@ -5267,76 +5277,89 @@ void UpdateRangeList( DOWNLOAD_INFO *di )
 
 				for ( unsigned short part = 1; part <= t_parts; ++part )
 				{
-					// Download was restarted before a range list was created.
-					if ( range_node == NULL )
-					{
-						ri = ( RANGE_INFO * )GlobalAlloc( GMEM_FIXED/*GPTR*/, sizeof( RANGE_INFO ) );
-						if ( ri != NULL )
-						{
-							range_node = DLL_CreateNode( ( void * )ri );
-							DLL_AddNode( &di->range_list, range_node, -1 );
-						}
+					ri = ( RANGE_INFO * )GlobalAlloc( GMEM_FIXED, sizeof( RANGE_INFO ) );
 
-						range_node = NULL;
-					}
-					else
+					if ( ri == NULL )
 					{
-						ri = ( RANGE_INFO * )range_node->data;
+						split_ok = false;
 
-						range_node = range_node->next;
+						break;
 					}
 
-					if ( ri != NULL )
+					ri->content_length = 0;
+					ri->content_offset = 0;
+
+					ri->range_start = ( part == 1 ? range_offset : range_offset + 1 );
+
+					if ( part < t_parts )
 					{
-						// Reuse this range info.
-						ri->content_length = 0;
-						ri->content_offset = 0;
-
-						if ( part == 1 )
-						{
-							ri->range_start = range_offset;
-						}
-						else
-						{
-							ri->range_start = range_offset + 1;
-						}
-
-						if ( part < t_parts )
-						{
-							range_offset += range_size;
-							ri->range_end = range_offset;
-						}
-						else	// Make sure we have an accurate range end for the last part.
-						{
-							ri->range_end = range_end;
-						}
-
-						ri->file_write_offset = ri->range_start;
+						range_offset += range_size;
+						ri->range_end = range_offset;
 					}
-					else
+					else	// Make sure we have an accurate range end for the last part.
 					{
-						--part;
-						--t_parts;
+						ri->range_end = range_end;
 					}
+
+					ri->file_write_offset = ri->range_start;
+
+					DoublyLinkedList *new_node = DLL_CreateNode( ( void * )ri );
+
+					if ( new_node == NULL )
+					{
+						GlobalFree( ri );
+
+						split_ok = false;
+
+						break;
+					}
+
+					DLL_AddNode( &split_list, new_node, -1 );
 				}
 
 				range_node_copy = range_node_copy->next;
 			}
 
-			di->range_list_end = range_node;
-
-			// Zero out the unused range info.
-			/*while ( range_node != NULL )
+			if ( split_ok )
 			{
-				ri = ( RANGE_INFO * )range_node->data;
-				ri->content_length = 0;
-				ri->content_offset = 0;
-				ri->file_write_offset = 0;
-				ri->range_end = 0;
-				ri->range_start = 0;
+				// Free the old list and swap in the rebuilt one.
+				while ( di->range_list != NULL )
+				{
+					DoublyLinkedList *old_node = di->range_list;
+					di->range_list = di->range_list->next;
 
-				range_node = range_node->next;
-			}*/
+					GlobalFree( old_node->data );
+					GlobalFree( old_node );
+				}
+
+				di->range_list = split_list;
+				di->range_list_end = NULL;
+				di->print_range_list = NULL;
+				di->range_queue = NULL;
+			}
+			else
+			{
+				// Allocation failed: keep the existing list untouched (it is still consistent).
+				while ( split_list != NULL )
+				{
+					DoublyLinkedList *old_node = split_list;
+					split_list = split_list->next;
+
+					GlobalFree( old_node->data );
+					GlobalFree( old_node );
+				}
+
+				di->range_list_end = NULL;
+			}
+		}
+		else
+		{
+			// No re-split: every node in the list is valid, so the endpoint must be the real end.
+			// Leaving a stale endpoint here (set by an earlier re-split that produced fewer
+			// ranges) made StartDownload and the "is anything missing" scan ignore the ranges
+			// that dynamic splitting had inserted since, so a restart could lose progress
+			// instead of gaining it.
+			di->range_list_end = NULL;
 		}
 
 		while ( active_range_list != NULL )
@@ -9801,22 +9824,34 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 				bool update_menus = false;
 
 				// A write that completed while the context was already being cleaned up skips the
-				// normal accounting (see IO_WriteFile). Those bytes ARE on disk, so fold the pending
-				// count into the range before deciding where to resume. Without this the retry
-				// re-fetches them and 'downloaded' counts them a second time - on a 543MB download
-				// with 71 resumes that inflated the counter to 676MB, which in turn made
-				// RecalculateDownloaded bail out and left a finished download stuck as "Stopped".
+				// normal accounting (see IO_WriteFile). Those bytes ARE on disk, so fold them into
+				// the range before deciding where to resume - otherwise the retry re-fetches them
+				// and 'downloaded' counts them a second time.
+				//
+				// Only the bytes that actually reached the file may be folded: file_write_offset is
+				// advanced by io_size for every completed write, so the delta over
+				// (range_start + content_offset) is exactly how much was stored. Using
+				// context->content_offset directly would over-credit the range whenever the server
+				// sends more than the range allows (this CDN does), which made a download report
+				// 100% while it was still transferring tens of MB.
 				if ( context->header_info.range_info != NULL &&
 					 context->content_offset > 0 &&
 				     context->status != STATUS_FILE_IO_ERROR )
 				{
-					context->header_info.range_info->content_offset += context->content_offset;
+					RANGE_INFO *cleanup_ri = context->header_info.range_info;
+					unsigned long long accounted = cleanup_ri->range_start + cleanup_ri->content_offset;
+
+					if ( cleanup_ri->file_write_offset > accounted )
+					{
+						cleanup_ri->content_offset += ( cleanup_ri->file_write_offset - accounted );
+
+						ClampRangeProgress( cleanup_ri );
+					}
+
 					context->content_offset = 0;
 
-					ClampRangeProgress( context->header_info.range_info );
-
 					// Keep the write cursor aligned with the range progress.
-					context->header_info.range_info->file_write_offset = context->header_info.range_info->range_start + context->header_info.range_info->content_offset;
+					cleanup_ri->file_write_offset = cleanup_ri->range_start + cleanup_ri->content_offset;
 				}
 
 				bool incomplete_part = false;
@@ -10116,6 +10151,13 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 							bool incomplete_download = false;
 							unsigned long long missing_bytes = 0;
 
+#ifdef ENABLE_LOGGING
+							unsigned int diag_ranges = 0;
+							unsigned long long diag_covered = 0;
+							unsigned long long diag_first_start = 0, diag_first_end = 0, diag_first_offset = 0;
+							unsigned int diag_first_index = 0;
+#endif
+
 							// Go through our range list and see if any connections have not fully completed.
 							// The length is computed defensively: for an invalid range (range_end < range_start)
 							// "( range_end - range_start ) + 1" underflows to a huge value, which kept a
@@ -10131,11 +10173,26 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 									unsigned long long range_length = ( range_info->range_end - range_info->range_start ) + 1;
 									unsigned long long range_done = ( range_info->content_offset <= range_length ? range_info->content_offset : range_length );
 
+#ifdef ENABLE_LOGGING
+									++diag_ranges;
+									diag_covered += range_length;
+#endif
+
 									if ( range_done < range_length )
 									{
 										incomplete_download = true;
 
 										missing_bytes += ( range_length - range_done );
+
+#ifdef ENABLE_LOGGING
+										if ( diag_first_index == 0 )
+										{
+											diag_first_index = diag_ranges;
+											diag_first_start = range_info->range_start;
+											diag_first_end = range_info->range_end;
+											diag_first_offset = range_info->content_offset;
+										}
+#endif
 									}
 								}
 
@@ -10146,8 +10203,9 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 							if ( incomplete_download )
 							{
 								WriteLog( LOG_INFO_CON_STATE,
-									"[INCOMPLETE] missing=%llu active_parts=%u queue=%d parts=%u has_end=%d",
-									missing_bytes, (unsigned int)di->active_parts,
+									"[INCOMPLETE] missing=%llu ranges=%u covered=%llu file=%llu first#%u=[%llu-%llu off=%llu] queue=%d parts=%u has_end=%d",
+									missing_bytes, diag_ranges, diag_covered, di->file_size,
+									diag_first_index, diag_first_start, diag_first_end, diag_first_offset,
 									( di->range_queue != NULL ? 1 : 0 ), (unsigned int)di->parts,
 									( di->range_list_end != NULL ? 1 : 0 ) );
 							}
@@ -10343,14 +10401,49 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 							{
 								if ( incomplete_download )
 								{
-									if ( !verifying_download &&
-										  di->retries < cfg_retry_downloads_count )
+									if ( !verifying_download )
 									{
-										++di->retries;
+										// A download that still has bytes missing is NOT a user-fixable
+										// error: servers drop connections, rate limit, time out and
+										// change behaviour mid-transfer. The download manager must keep
+										// re-issuing the missing ranges until the file is complete.
+										//
+										// So the attempt budget is reset whenever the previous attempt
+										// made progress; only consecutive attempts that gain NOTHING
+										// count against "Retry downloads" (2 by default). Before this,
+										// a throttling CDN left a 543MB download permanently "Stopped"
+										// with a few MB missing even though every attempt gained data.
+										bool made_progress = ( di->downloaded > di->retry_progress_mark );
 
-										SetStatus( di, STATUS_NONE );
+										if ( made_progress )
+										{
+											di->retry_progress_mark = di->downloaded;
 
-										StartDownload( di, START_TYPE_NONE, START_OPERATION_NONE );
+											di->retries = 0;
+										}
+										else if ( di->retries < 250 )
+										{
+											++di->retries;
+										}
+
+										// +1 because the first attempt is not a retry. The configured
+										// "Retry downloads" is treated as a floor, not a hard stop: a
+										// server that keeps refusing us is exactly the case a download
+										// manager is supposed to ride out, so the default budget is at
+										// least 20 consecutive no-progress attempts (minutes of retrying;
+										// the user can still press Stop at any time).
+										unsigned int retry_cap = ( cfg_retry_downloads_count > 20 ? cfg_retry_downloads_count : 20 );
+
+										if ( made_progress || di->retries <= retry_cap )
+										{
+											SetStatus( di, STATUS_NONE );
+
+											StartDownload( di, START_TYPE_NONE, START_OPERATION_NONE );
+										}
+										else
+										{
+											SetSessionStatusCount( di->status );
+										}
 									}
 									else
 									{

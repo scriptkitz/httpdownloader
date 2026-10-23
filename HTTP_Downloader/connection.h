@@ -509,6 +509,11 @@ struct DOWNLOAD_INFO
 	unsigned char		hosts;
 	unsigned char		active_hosts;
 
+	// downloaded at the end of the previous attempt. An attempt that moved this forward means
+	// the server is still serving us data, so the retry budget is reset and the download keeps
+	// going; only attempts that gain nothing count against cfg_retry_downloads_count.
+	unsigned long long	retry_progress_mark;
+
 	unsigned char		file_exists_choice;	// Answer to the "file already exists" prompt for this
 											// download (CMBIDRENAME/OVERWRITE/SKIP...), 0 = not asked.
 											// A download owns exactly one destination file, so the
