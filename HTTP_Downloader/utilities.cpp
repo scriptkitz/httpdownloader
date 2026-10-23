@@ -3377,6 +3377,12 @@ bool UnInitLogging()
 	return ( ret != FALSE ? true : false );
 }
 
+// True when a log file has already been opened (so callers can fall back to a default path).
+bool IsLogOpen()
+{
+	return ( g_can_log && hFile_log != INVALID_HANDLE_VALUE );
+}
+
 void OpenLog( wchar_t *file_path, unsigned int log_filter )
 {
 	if ( g_can_log )

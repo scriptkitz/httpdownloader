@@ -9800,6 +9800,25 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 			{
 				bool update_menus = false;
 
+				// A write that completed while the context was already being cleaned up skips the
+				// normal accounting (see IO_WriteFile). Those bytes ARE on disk, so fold the pending
+				// count into the range before deciding where to resume. Without this the retry
+				// re-fetches them and 'downloaded' counts them a second time - on a 543MB download
+				// with 71 resumes that inflated the counter to 676MB, which in turn made
+				// RecalculateDownloaded bail out and left a finished download stuck as "Stopped".
+				if ( context->header_info.range_info != NULL &&
+					 context->content_offset > 0 &&
+				     context->status != STATUS_FILE_IO_ERROR )
+				{
+					context->header_info.range_info->content_offset += context->content_offset;
+					context->content_offset = 0;
+
+					ClampRangeProgress( context->header_info.range_info );
+
+					// Keep the write cursor aligned with the range progress.
+					context->header_info.range_info->file_write_offset = context->header_info.range_info->range_start + context->header_info.range_info->content_offset;
+				}
+
 				bool incomplete_part = false;
 
 				if ( context->header_info.range_info != NULL &&  
@@ -10095,21 +10114,44 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 							}
 
 							bool incomplete_download = false;
+							unsigned long long missing_bytes = 0;
 
 							// Go through our range list and see if any connections have not fully completed.
+							// The length is computed defensively: for an invalid range (range_end < range_start)
+							// "( range_end - range_start ) + 1" underflows to a huge value, which kept a
+							// finished download "incomplete" forever (observed as "Stopped - 100%" on a
+							// Ghidra 543MB download whose bytes were all on disk).
 							DoublyLinkedList *range_node = di->range_list;
 							while ( range_node != di->range_list_end )
 							{
 								RANGE_INFO *range_info = ( RANGE_INFO * )range_node->data;
-								if ( range_info->content_offset < ( ( range_info->range_end - range_info->range_start ) + 1 ) )
-								{
-									incomplete_download = true;
 
-									break;
+								if ( range_info != NULL && range_info->range_end >= range_info->range_start )
+								{
+									unsigned long long range_length = ( range_info->range_end - range_info->range_start ) + 1;
+									unsigned long long range_done = ( range_info->content_offset <= range_length ? range_info->content_offset : range_length );
+
+									if ( range_done < range_length )
+									{
+										incomplete_download = true;
+
+										missing_bytes += ( range_length - range_done );
+									}
 								}
-								
+
 								range_node = range_node->next;
 							}
+
+#ifdef ENABLE_LOGGING
+							if ( incomplete_download )
+							{
+								WriteLog( LOG_INFO_CON_STATE,
+									"[INCOMPLETE] missing=%llu active_parts=%u queue=%d parts=%u has_end=%d",
+									missing_bytes, (unsigned int)di->active_parts,
+									( di->range_queue != NULL ? 1 : 0 ), (unsigned int)di->parts,
+									( di->range_list_end != NULL ? 1 : 0 ) );
+							}
+#endif
 
 							if ( incomplete_download )
 							{

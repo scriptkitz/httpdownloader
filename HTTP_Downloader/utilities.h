@@ -150,6 +150,7 @@ extern pgetpeername		_getpeername;*/
 bool InitLogging();
 bool UnInitLogging();
 
+bool IsLogOpen();
 void OpenLog( wchar_t *file_path, unsigned int log_filter );
 void CloseLog();
 void WriteLog( unsigned int type, const char *format, ... );

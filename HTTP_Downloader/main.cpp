@@ -675,10 +675,29 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 					++arg;
 
 					unsigned int log_filter = 0;
+
+					// Optional filter digits: only 1-5 are valid, and only when a path follows.
+					// "--log 12345 log.txt" (all types) and "--log log.txt" both work.
 					wchar_t *ptr = szArgList[ arg ];
-					while ( ptr != NULL && *ptr != NULL )
+					bool digits_only = ( ptr != NULL && *ptr != 0 );
+
+					while ( ptr != NULL && *ptr != 0 )
 					{
-						if ( *ptr >= L'0' && *ptr <= L'9' )
+						if ( *ptr < L'1' || *ptr > L'5' )
+						{
+							digits_only = false;
+
+							break;
+						}
+
+						++ptr;
+					}
+
+					if ( digits_only && ( arg + 1 ) < argCount )
+					{
+						ptr = szArgList[ arg ];
+
+						while ( ptr != NULL && *ptr != 0 )
 						{
 							unsigned char log_type = ( unsigned char )( *ptr - L'0' );
 							switch ( log_type )
@@ -689,11 +708,16 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 								case 4: { log_filter |= LOG_WARNING; } break;
 								case 5: { log_filter |= LOG_ERROR; } break;
 							}
+							++ptr;
 						}
-						++ptr;
+
+						++arg;	// Move to the supplied filepath.
 					}
 
-					++arg;	// Move to the supplied filepath.
+					if ( log_filter == 0 )
+					{
+						log_filter = ( LOG_INFO_MISC | LOG_INFO_ACTION | LOG_INFO_CON_STATE | LOG_WARNING | LOG_ERROR );
+					}
 
 					OpenLog( szArgList[ arg ], log_filter );
 				}
@@ -751,7 +775,7 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 			unsigned char ssl_type = 0;	// 0 = BoringSSL (default), 1 = OpenSSL
 			g_use_openssl = true;
 		#endif
-		#ifndef LIBCRYPTO_USE_STATIC_LIB
+	#ifndef LIBCRYPTO_USE_STATIC_LIB
 			if ( g_use_openssl )
 			{
 				if ( ssl_type == 0 )
@@ -773,8 +797,38 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 					UnInitializeLibSSL();
 				}
 			}
-		#endif
+	#endif
 	}
+
+#ifdef ENABLE_LOGGING
+	// The logging build always produces a log. Unless the caller named one with
+	// "--log [filters] <path>", write to "<exe directory>\<exe name>.log" so a test run
+	// needs no extra arguments (and can never spill into another build's log).
+	if ( !IsLogOpen() )
+	{
+		wchar_t default_log_path[ MAX_PATH ];
+
+		DWORD default_log_length = GetModuleFileNameW( NULL, default_log_path, MAX_PATH );
+
+		if ( default_log_length > 0 && default_log_length < MAX_PATH )
+		{
+			int path_length = ( int )default_log_length;
+			int extension_offset = get_file_extension_offset( default_log_path, path_length );
+
+			if ( extension_offset >= path_length )
+			{
+				extension_offset = path_length;
+			}
+
+			if ( ( MAX_PATH - extension_offset ) >= 5 )
+			{
+				_wmemcpy_s( default_log_path + extension_offset, MAX_PATH - extension_offset, L".log\0", 5 );
+
+				OpenLog( default_log_path, ( LOG_INFO_MISC | LOG_INFO_ACTION | LOG_INFO_CON_STATE | LOG_WARNING | LOG_ERROR ) );
+			}
+		}
+	}
+#endif
 
 #ifdef ENABLE_DARK_MODE
 	if ( IsWindowsVersionOrGreater( HIBYTE( _WIN32_WINNT_WIN10 ), LOBYTE( _WIN32_WINNT_WIN10 ), 0 ) )
