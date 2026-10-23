@@ -2840,6 +2840,14 @@ char ParseHTTPHeader( SOCKET_CONTEXT *context, char *header_buffer, unsigned int
 
 			unsigned long long content_length = GetContentLength( header_buffer );
 
+			// A missing header and "Content-Length: 0" both parse to 0, but they mean very
+			// different things: an empty body versus a body of unknown length that ends when
+			// the connection closes. Remember which one we got.
+			char *cl_value = NULL;
+			char *cl_value_end = NULL;
+
+			context->header_info.has_content_length = ( GetHeaderValue( header_buffer, "Content-Length", 14, &cl_value, &cl_value_end ) != NULL );
+
 			GetContentRange( header_buffer, context->header_info.range_info );
 
 			// Set the content_length and range content_length to the same value. (Use the greater of the two values.)
@@ -3617,6 +3625,15 @@ char GetHTTPHeader( SOCKET_CONTEXT *context, char *header_buffer, unsigned int h
 
 				EnterCriticalSection( &context->download_info->di_cs );
 
+				// A response that reports no size (no Content-Length, no Content-Range) cannot be
+				// split: the body is delimited by the connection closing, so every part would be a
+				// one byte fragment and the first buffer would look like a finished download.
+				// Chunked responses are in the same situation (their total is unknown too).
+				if ( context->header_info.range_info->content_length == 0 && context->parts > 1 )
+				{
+					context->parts = 1;
+				}
+
 				context->download_info->parts = context->parts;
 
 				if ( IS_GROUP( context->download_info ) )
@@ -4189,8 +4206,9 @@ char MakeRangeRequest( SOCKET_CONTEXT *context )
 			}
 		}
 
-		// Create a new connection for the remaining parts.
-		if ( context->parts > 1 )
+		// Create a new connection for the remaining parts. A zero content_length means the
+		// server reported no size at all, so there is nothing to divide evenly.
+		if ( context->parts > 1 && context->header_info.range_info->content_length > 1 )
 		{
 			unsigned long long content_length = context->header_info.range_info->content_length;
 
@@ -4427,6 +4445,8 @@ char MakeRequest( SOCKET_CONTEXT *context, IO_OPERATION next_operation, bool use
 			//context->header_info.etag = false;
 			context->header_info.got_chunk_start = false;
 			context->header_info.got_chunk_terminator = false;
+			context->header_info.got_end_of_content = false;
+			context->header_info.has_content_length = false;
 
 			context->header_info.range_info->content_length = 0;	// We must reset this to get the real request length (not the length of the 401/407 request).
 
@@ -5345,13 +5365,23 @@ char GetHTTPResponseContent( SOCKET_CONTEXT *context, char *response_buffer, uns
 			response_buffer_length -= ( unsigned int )( context->header_info.end_of_header - response_buffer );
 			response_buffer = context->header_info.end_of_header;
 
-			// Handle zero byte files.
+			// Handle zero byte files. Only a response that explicitly said "Content-Length: 0"
+			// is empty: with no length header at all the body is still on its way and the fact
+			// that it has not arrived in the same TCP segment means nothing.
 			if ( response_buffer_length == 0 &&
 				 context->header_info.range_info->content_length == 0 &&
+				 context->header_info.has_content_length &&
 				!context->header_info.chunked_transfer &&
 				 context->header_info.content_encoding == CONTENT_ENCODING_NONE )
 			{
-				context->header_info.range_info->content_offset = 1;	// Prevents us from retrying the connection in CleanupConnection().
+				// No body and no length: the response is simply empty. Give the range a real
+				// (one byte, already complete) length so it is not mistaken for an unbounded
+				// body that still has data to come.
+				context->header_info.range_info->content_length = 1;
+				context->header_info.range_info->range_end = context->header_info.range_info->range_start;
+				context->header_info.range_info->content_offset = 1;
+
+				context->header_info.got_end_of_content = true;
 
 				return CONTENT_STATUS_FAILED;	// We have no more data, so just close the connection.
 			}
@@ -5391,8 +5421,14 @@ char GetHTTPResponseContent( SOCKET_CONTEXT *context, char *response_buffer, uns
 
 		content_status = CONTENT_STATUS_READ_MORE_CONTENT;
 
-		// Offset past the chunk terminating token.
-		if ( response_buffer_length >= 2 && response_buffer[ 0 ] == '\r' && response_buffer[ 1 ] == '\n' )
+		// Offset past the chunk terminating token. Only when a chunk's payload has been fully
+		// consumed: a payload can legitimately begin with 0D 0A, and skipping it there shifted
+		// the whole stream (a later "chunk length" was read from payload bytes, which could
+		// even parse as 0 and end the body early).
+		if ( context->header_info.got_chunk_start &&
+			 context->header_info.chunk_length == 0 &&
+			 response_buffer_length >= 2 &&
+			 response_buffer[ 0 ] == '\r' && response_buffer[ 1 ] == '\n' )
 		{
 			response_buffer_length -= 2;
 			response_buffer += 2;
@@ -5404,22 +5440,45 @@ char GetHTTPResponseContent( SOCKET_CONTEXT *context, char *response_buffer, uns
 		{
 			if ( !context->header_info.got_chunk_start )
 			{
-				// End of chunk value.
-				char *end_chunk = _StrStrA( response_buffer, "\r\n" );
+				// End of chunk value. Search the received bytes only: the payload is binary, so
+				// _StrStrA-style scanning stops at the first NUL and reports "no header" (which
+				// made a chunk header that had already been consumed look like a span across the
+				// buffer, killing chunked downloads partway through).
+				char *end_chunk = NULL;
+
+				for ( unsigned int i = 0; ( i + 1 ) < response_buffer_length; ++i )
+				{
+					if ( response_buffer[ i ] == '\r' && response_buffer[ i + 1 ] == '\n' )
+					{
+						end_chunk = response_buffer + i;
+
+						break;
+					}
+				}
+
 				if ( end_chunk == NULL )
 				{
 					if ( response_buffer > context->buffer )
 					{
 						_memmove( context->buffer, response_buffer, response_buffer_length );
 
-						context->wsabuf.buf += response_buffer_length;
-						context->wsabuf.len -= response_buffer_length;
+						// The bytes now start at the beginning of the buffer, so the next receive
+						// belongs right after them. Shifting the old cursor instead pushed it past
+						// the buffer end whenever the buffer was full, leaving a zero-length
+						// receive which looked like the peer had closed the connection (chunked
+						// downloads were truncated at that point).
+						context->wsabuf.buf = context->buffer + response_buffer_length;
+						context->wsabuf.len = context->buffer_size - response_buffer_length;
 
 						content_status = CONTENT_STATUS_READ_MORE_CONTENT;	// Read more content data.
 						break;
 					}
 					else	// Buffer is too small.
 					{
+#ifdef ENABLE_LOGGING
+						WriteLog( LOG_INFO_CON_STATE, "[CHUNK-FAIL] chunk header spans buffer: rlen=%u buf=%p pos=%p",
+							response_buffer_length, (void *)context->buffer, (void *)response_buffer );
+#endif
 						content_status = CONTENT_STATUS_FAILED;
 						break;
 					}
@@ -5450,8 +5509,13 @@ char GetHTTPResponseContent( SOCKET_CONTEXT *context, char *response_buffer, uns
 					{
 						_memmove( context->buffer, response_buffer, response_buffer_length );
 
-						context->wsabuf.buf += response_buffer_length;
-						context->wsabuf.len -= response_buffer_length;
+						// The bytes now start at the beginning of the buffer, so the next receive
+						// belongs right after them. Shifting the old cursor instead pushed it past
+						// the buffer end whenever the buffer was full, leaving a zero-length
+						// receive which looked like the peer had closed the connection (chunked
+						// downloads were truncated at that point).
+						context->wsabuf.buf = context->buffer + response_buffer_length;
+						context->wsabuf.len = context->buffer_size - response_buffer_length;
 
 						content_status = CONTENT_STATUS_READ_MORE_CONTENT;	// Read more content data.
 						break;
@@ -5569,6 +5633,12 @@ char GetHTTPResponseContent( SOCKET_CONTEXT *context, char *response_buffer, uns
 					}
 					else	// Bad terminator. Can't continue.
 					{
+#ifdef ENABLE_LOGGING
+						WriteLog( LOG_INFO_CON_STATE, "[CHUNK-FAIL] bad terminator: rlen=%u b0=%02x b1=%02x",
+							response_buffer_length,
+							( response_buffer_length > 0 ? (unsigned char)response_buffer[ 0 ] : 0 ),
+							( response_buffer_length > 1 ? (unsigned char)response_buffer[ 1 ] : 0 ) );
+#endif
 						content_status = CONTENT_STATUS_FAILED;
 						break;
 					}
@@ -5579,8 +5649,13 @@ char GetHTTPResponseContent( SOCKET_CONTEXT *context, char *response_buffer, uns
 					{
 						_memmove( context->buffer, response_buffer, response_buffer_length );
 
-						context->wsabuf.buf += response_buffer_length;
-						context->wsabuf.len -= response_buffer_length;
+						// The bytes now start at the beginning of the buffer, so the next receive
+						// belongs right after them. Shifting the old cursor instead pushed it past
+						// the buffer end whenever the buffer was full, leaving a zero-length
+						// receive which looked like the peer had closed the connection (chunked
+						// downloads were truncated at that point).
+						context->wsabuf.buf = context->buffer + response_buffer_length;
+						context->wsabuf.len = context->buffer_size - response_buffer_length;
 					}
 
 					content_status = CONTENT_STATUS_READ_MORE_CONTENT;
@@ -5724,9 +5799,15 @@ char GetHTTPResponseContent( SOCKET_CONTEXT *context, char *response_buffer, uns
 			}
 		}
 
-		if ( ( context->parts == 1 && context->header_info.connection == CONNECTION_KEEP_ALIVE && context->header_info.got_chunk_terminator ) ||
+		// A zero length chunk terminates the body, so there is nothing left to read even when
+		// the connection is keep-alive and the part count does not tell us anything (a single
+		// probing connection can carry the full "parts" value of the download).
+		unsigned long long chunked_total = RangeLength( context->header_info.range_info );
+
+		if ( context->header_info.got_chunk_terminator ||
 		   ( ( context->parts > 1 || ( context->download_info != NULL && IS_GROUP( context->download_info ) ) ) &&
-			 ( context->header_info.range_info->content_offset >= ( ( context->header_info.range_info->range_end - context->header_info.range_info->range_start ) + 1 ) ) ) )
+			 chunked_total != 0 &&
+			 ( context->header_info.range_info->content_offset >= chunked_total ) ) )
 		{
 			return CONTENT_STATUS_FAILED;	// We have no more data, so just close the connection.
 		}

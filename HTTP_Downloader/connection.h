@@ -280,6 +280,11 @@ struct HEADER_INFO
 	//bool				etag;
 	bool				got_chunk_start;
 	bool				got_chunk_terminator;
+	bool				got_end_of_content;	// The body ended because the connection closed
+											// (no Content-Length and no chunked framing).
+	bool				has_content_length;	// The response actually carried a Content-Length
+											// header (distinguishes an empty body from an
+											// unknown size, both of which parse as 0).
 };
 
 struct POST_INFO
@@ -615,6 +620,18 @@ unsigned short CountActiveParts( DOWNLOAD_INFO *di );
 // ignores the Range header (or re-delivers a resumed region) from pushing the resume point
 // past the end of the range, which produced "HTTP 416" on the next request.
 void ClampRangeProgress( RANGE_INFO *ri );
+
+// A range with no upper bound: the server reported neither a Content-Length nor a
+// Content-Range, so the body is delimited by the connection closing ("HTTP/1.0 style").
+// Such a range cannot be sized, split or resumed - one connection downloads it until EOF.
+bool RangeIsUnbounded( const RANGE_INFO *ri );
+
+// Bytes the range can hold, or 0 when it has no upper bound (see RangeIsUnbounded).
+unsigned long long RangeLength( const RANGE_INFO *ri );
+
+// Give an unbounded range its real length once the body ended, so that completion checks
+// and byte totals behave like they do for a normal range.
+void SealUnboundedRange( RANGE_INFO *ri );
 
 void AddToMoveFileQueue( DOWNLOAD_INFO *di );
 
