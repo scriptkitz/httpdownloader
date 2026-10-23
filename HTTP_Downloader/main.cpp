@@ -993,13 +993,6 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		SaveProxyList();
 	}
 
-#ifdef ENABLE_LOGGING
-	// Permanent logger-mode debug trace: shows the reallocation settings that were loaded,
-	// so the test harness can verify a debug reset was persisted.
-	WriteLog( LOG_INFO_CON_STATE, "[DEBUG] startup config: cfg_reallocate_parts=%d cfg_reallocate_threshold_size=%llu",
-		( int )cfg_reallocate_parts, cfg_reallocate_threshold_size );
-#endif
-
 	if ( !override_shutdown_action )
 	{
 		g_shutdown_action = cfg_shutdown_action;

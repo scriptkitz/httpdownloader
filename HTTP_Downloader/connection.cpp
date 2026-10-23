@@ -357,8 +357,11 @@ void SealUnboundedRange( RANGE_INFO *ri )
 	}
 	else
 	{
-		// Empty body: keep a one byte range whose progress is already complete. That is the
-		// same shape the empty-file path has always used to mark itself finished.
+		// Empty body: a one byte range whose progress is already complete, which is the shape
+		// the empty-file path has always used. content_length has to become non-zero as well,
+		// otherwise the range still satisfies RangeIsUnbounded() and the "is anything missing"
+		// scan would keep treating the finished, empty response as unfinished.
+		ri->content_length = 1;
 		ri->range_end = ri->range_start;
 		ri->content_offset = 1;
 	}
@@ -369,14 +372,11 @@ void ClampRangeProgress( RANGE_INFO *ri )
 	// An unbounded range has no length to clamp against; its progress is however much the
 	// server sent before closing the connection. Clamping it to the 1 byte probe range is
 	// what made unknown-size downloads report "Completed" after a few hundred MB.
-	if ( ri != NULL && !RangeIsUnbounded( ri ) && ri->range_end >= ri->range_start )
-	{
-		unsigned long long range_length = ( ri->range_end - ri->range_start ) + 1;
+	unsigned long long range_length = RangeLength( ri );
 
-		if ( ri->content_offset > range_length )
-		{
-			ri->content_offset = range_length;
-		}
+	if ( range_length != 0 && ri->content_offset > range_length )
+	{
+		ri->content_offset = range_length;
 	}
 }
 
@@ -5278,7 +5278,7 @@ void UpdateRangeList( DOWNLOAD_INFO *di )
 		DoublyLinkedList *active_range_list = NULL;
 
 		// Determine the number of ranges that still need downloading.
-		unsigned short unbounded_count = 0;
+		bool has_unbounded = false;
 
 		while ( range_node != NULL )
 		{
@@ -5292,7 +5292,7 @@ void UpdateRangeList( DOWNLOAD_INFO *di )
 
 				if ( ri_length == 0 && RangeIsUnbounded( ri ) )
 				{
-					++unbounded_count;
+					has_unbounded = true;
 				}
 
 				if ( ri_length == 0 || ri->content_offset < ri_length )
@@ -5320,7 +5320,7 @@ void UpdateRangeList( DOWNLOAD_INFO *di )
 		// Can we split any remaining parts to fill the total? Never split an unbounded range:
 		// its "length" is unknown, so every piece would be a 1 byte fragment with no way to
 		// know when it is done.
-		if ( range_info_count > 0 && range_info_count < di->parts && unbounded_count == 0 )
+		if ( range_info_count > 0 && range_info_count < di->parts && !has_unbounded )
 		{
 			unsigned short parts = di->parts / range_info_count;
 			unsigned short rem_parts = di->parts % range_info_count;
@@ -9947,14 +9947,10 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 					cleanup_ri->file_write_offset = cleanup_ri->range_start + cleanup_ri->content_offset;
 				}
 
-				// A response without any size information (no Content-Length, no Content-Range,
-				// not chunked) is delimited by the connection closing. Once the peer closed it,
-				// seal the range with the number of bytes actually stored so that the completion
-				// checks below behave exactly like they do for a normal sized range.
-				// A body with no size information ends when the connection ends - that is the only
-				// delimitation the protocol offers for such a response, and a normal close looks
-				// exactly like a reset from the client's side. A timeout is not an ending: the
-				// server stopped answering mid-body, so keep the partial data and retry.
+				// A body with no size information (no Content-Length, no Content-Range) ends when
+				// the connection ends - that is the only delimitation the protocol offers, and a
+				// normal close looks exactly like a reset from here. A timeout is not an ending:
+				// the server stopped answering mid-body, so keep the partial data and retry.
 				bool unbounded_range = ( context->header_info.range_info != NULL &&
 										 RangeIsUnbounded( context->header_info.range_info ) );
 
@@ -9963,17 +9959,19 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 					( context->header_info.got_end_of_content ||
 					  ( unbounded_range && context->timed_out == TIME_OUT_FALSE ) ) );
 
-				if ( context->header_info.range_info != NULL &&
-					 body_complete &&
-				     RangeIsUnbounded( context->header_info.range_info ) )
+				// Seal the range with the bytes actually stored, so the checks below behave the
+				// same way they do for a response that reported its size up front.
+				if ( unbounded_range && body_complete )
 				{
 					RANGE_INFO *sealed_ri = context->header_info.range_info;
 					unsigned long long sealed_size = sealed_ri->content_offset;
 
 					SealUnboundedRange( sealed_ri );
 
+					unbounded_range = false;
+
 					// The file size was unknown while downloading; now we know it.
-					if ( sealed_size > 0 && di->shared_info != NULL && di->shared_info->file_size == 0 )
+					if ( sealed_size > 0 && di->shared_info != NULL )
 					{
 						EnterCriticalSection( &di->shared_info->di_cs );
 
@@ -9986,22 +9984,14 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 					}
 				}
 
-				bool incomplete_part = false;
+				// RangeLength() is 0 for a range that never got an upper bound; such a part is by
+				// definition unfinished. Computing "( range_end - range_start ) + 1" here would
+				// say 1 and make the very first buffer look like a finished download.
+				unsigned long long part_length = RangeLength( context->header_info.range_info );
 
-				// An unbounded range that never reached EOF has no length to compare against;
-				// treat it as incomplete so the retry logic below runs. RangeLength() is 0 for
-				// those, and "( range_end - range_start ) + 1" would say 1, which used to make
-				// the very first buffer look like a finished download.
-				if ( context->header_info.range_info != NULL )
-				{
-					unsigned long long part_length = RangeLength( context->header_info.range_info );
-
-					if ( part_length == 0 ||
-					   ( context->header_info.range_info->content_offset < part_length ) )
-					{
-						incomplete_part = true;
-					}
-				}
+				bool incomplete_part = ( context->header_info.range_info != NULL &&
+									   ( part_length == 0 ||
+										 context->header_info.range_info->content_offset < part_length ) );
 
 				// Don't retry the download if we're verifying it.
 				bool verifying_download = ( di->shared_info->download_operations & DOWNLOAD_OPERATION_VERIFY ? true : false );
@@ -10020,33 +10010,22 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 				unsigned long long part_position = ( context->header_info.range_info != NULL ?
 					( context->header_info.range_info->range_start + context->header_info.range_info->content_offset ) : 0 );
 
-				// A response with no size cannot be resumed: the server never told us how long
-				// the body is and (having answered 200) does not honour Range requests, so the
-				// only correct recovery is to start that body over from byte 0. Keeping the
-				// partial progress here would resume at an offset the server ignores and write
-				// the rest of the body on top of the wrong position.
-				bool unbounded_part = ( context->header_info.range_info != NULL &&
-										RangeIsUnbounded( context->header_info.range_info ) );
-
-				if ( unbounded_part )
+				// A response with no size cannot be resumed: the server never told us how long the
+				// body is and (having answered 200) does not honour Range requests, so the only
+				// correct recovery is to start that body over from byte 0. Keeping the partial
+				// progress would resume at an offset the server ignores and write the rest of the
+				// body at the wrong position.
+				if ( unbounded_range )
 				{
 					context->header_info.range_info->content_offset = 0;
 					context->header_info.range_info->file_write_offset = 0;
 
-					if ( di->shared_info != NULL )
-					{
-						EnterCriticalSection( &di->shared_info->di_cs );
+					EnterCriticalSection( &di->di_cs );
 
-						di->downloaded = 0;
-						di->retry_progress_mark = 0;
+					di->downloaded = 0;
+					di->retry_progress_mark = 0;
 
-						LeaveCriticalSection( &di->shared_info->di_cs );
-					}
-					else
-					{
-						di->downloaded = 0;
-						di->retry_progress_mark = 0;
-					}
+					LeaveCriticalSection( &di->di_cs );
 
 					part_position = 0;
 				}
@@ -10061,7 +10040,7 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 					part_baseline = context->header_info.range_info->range_start;
 				}
 
-				bool resumable_part = ( incomplete_part && !unbounded_part && context->processed_header && part_position > part_baseline );
+				bool resumable_part = ( incomplete_part && !unbounded_range && context->processed_header && part_position > part_baseline );
 
 
 				// Connecting, Downloading, Paused.
@@ -10126,7 +10105,7 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 
 						// An unbounded range always restarts at byte 0: it has no resume point
 						// because the server never reported a length and does not honour Range.
-						if ( !unbounded_part )
+						if ( !unbounded_range )
 						{
 							context->header_info.range_info->range_start += context->header_info.range_info->content_offset;	// Begin where we left off.
 						}

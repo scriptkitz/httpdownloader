@@ -1399,6 +1399,25 @@ unsigned char GetHTTPMethod( char *header )
 	return method_type;
 }
 
+// Find the CRLF that terminates a chunk-size line.
+//
+// The search must be bounded: chunked payloads are binary, so _StrStrA-style helpers stop at
+// the first NUL byte and report "no terminator" even when one is present. That made an
+// already-consumed chunk header look like it spanned the receive buffer, which aborted
+// chunked downloads at a fixed offset (132792320 bytes = 8105 * 16384 in practice).
+char *FindCRLF( char *buffer, unsigned int length )
+{
+	for ( unsigned int i = 0; ( i + 1 ) < length; ++i )
+	{
+		if ( buffer[ i ] == '\r' && buffer[ i + 1 ] == '\n' )
+		{
+			return buffer + i;
+		}
+	}
+
+	return NULL;
+}
+
 bool GetTransferEncoding( char *header )
 {
 	char *transfer_encoding_header = NULL;
@@ -5440,21 +5459,8 @@ char GetHTTPResponseContent( SOCKET_CONTEXT *context, char *response_buffer, uns
 		{
 			if ( !context->header_info.got_chunk_start )
 			{
-				// End of chunk value. Search the received bytes only: the payload is binary, so
-				// _StrStrA-style scanning stops at the first NUL and reports "no header" (which
-				// made a chunk header that had already been consumed look like a span across the
-				// buffer, killing chunked downloads partway through).
-				char *end_chunk = NULL;
-
-				for ( unsigned int i = 0; ( i + 1 ) < response_buffer_length; ++i )
-				{
-					if ( response_buffer[ i ] == '\r' && response_buffer[ i + 1 ] == '\n' )
-					{
-						end_chunk = response_buffer + i;
-
-						break;
-					}
-				}
+				// End of chunk value.
+				char *end_chunk = FindCRLF( response_buffer, response_buffer_length );
 
 				if ( end_chunk == NULL )
 				{
