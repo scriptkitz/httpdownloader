@@ -407,6 +407,12 @@ DWORD WINAPI UpdateWindow( LPVOID /*WorkThreadContext*/ )
 		// This will allow the timer to go through at least one loop after it's been disabled (g_timers_running == false).
 		run_timer = g_timers_running;
 
+#ifdef ENABLE_LOGGING
+		// Worker threads only append to the log buffer; the (blocking) write happens here, once
+		// a second, so IOCP threads never wait on the log file's I/O.
+		FlushLog();
+#endif
+
 		g_session_downloaded_speed = 0;
 
 		if ( TryEnterCriticalSection( &worker_cs ) == TRUE )

@@ -3347,12 +3347,36 @@ bool InitLogging()
 	return true;
 }
 
+// Writes the buffered log data. The caller must hold logging_cs.
+static void FlushLogLocked()
+{
+	if ( g_log_buffer_offset > 0 )
+	{
+		if ( hFile_log != INVALID_HANDLE_VALUE && g_log_buffer != NULL )
+		{
+			DWORD written = 0;
+
+			WriteFile( hFile_log, g_log_buffer, g_log_buffer_offset, &written, NULL );
+		}
+
+		g_log_buffer_offset = 0;
+	}
+}
+
 bool UnInitLogging()
 {
 	BOOL ret = TRUE;
 
 	if ( g_can_log )
 	{
+		// Take the lock before tearing anything down: a worker thread may still be inside
+		// WriteLog, and freeing the buffer (or deleting the critical section underneath it)
+		// would be a use-after-free. Setting g_can_log to false first makes late callers skip
+		// the whole path.
+		EnterCriticalSection( &logging_cs );
+
+		FlushLogLocked();
+
 		if ( g_log_buffer != NULL )
 		{
 			GlobalFree( g_log_buffer );
@@ -3360,6 +3384,10 @@ bool UnInitLogging()
 		}
 
 		g_log_buffer_offset = 0;
+
+		g_can_log = false;
+
+		LeaveCriticalSection( &logging_cs );
 
 		DeleteCriticalSection( &logging_cs );
 	}
@@ -3518,6 +3546,9 @@ void CloseLog()
 	{
 		EnterCriticalSection( &logging_cs );
 
+		// Anything still buffered has to reach the file before the handle goes away.
+		FlushLogLocked();
+
 		if ( hFile_log != INVALID_HANDLE_VALUE )
 		{
 			CloseHandle( hFile_log );
@@ -3528,9 +3559,21 @@ void CloseLog()
 	}
 }
 
+void FlushLog()
+{
+	if ( g_can_log )
+	{
+		EnterCriticalSection( &logging_cs );
+
+		FlushLogLocked();
+
+		LeaveCriticalSection( &logging_cs );
+	}
+}
+
 void WriteLog( unsigned int type, const char *format, ... )
 {
-	if ( g_can_log && ( type & g_log_filter ) )
+	if ( g_can_log && ( type & g_log_filter ) && g_log_buffer != NULL )
 	{
 		EnterCriticalSection( &logging_cs );
 
@@ -3561,23 +3604,45 @@ void WriteLog( unsigned int type, const char *format, ... )
 				str_type = "";
 			}
 
+			// Append to the buffer only. Flushing here would make every IOCP thread take the
+			// hit of a synchronous WriteFile (and the threads serialise on logging_cs), which
+			// stalls network completions - worst when the log sits on a synced folder such as
+			// OneDrive. FlushLog() does the I/O from the UI tick instead.
 			g_log_buffer_offset += __snprintf( LOG_BUFFER, LOG_BUFFER_OFFSET, "%04d-%02d-%02d %02d:%02d:%02d.%03d UTC | %s | ", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, str_type );
+
+			// vsnprintf reports the length it WOULD have written, so a long line (a URL, a %S of
+			// odd data) can push the offset past the end of the buffer. Clamp before anything
+			// else uses LOG_BUFFER/LOG_BUFFER_OFFSET again.
+			if ( g_log_buffer_offset >= LOG_BUFFER_SIZE )
+			{
+				g_log_buffer_offset = LOG_BUFFER_SIZE - 1;
+			}
 
 			va_start( arglist, format );
 
 			g_log_buffer_offset += __vsnprintf( LOG_BUFFER, LOG_BUFFER_OFFSET, format, arglist );
 
-			_memcpy_s( LOG_BUFFER, LOG_BUFFER_OFFSET, "\r\n", 2 );
-
-			g_log_buffer_offset += 2;
-
 			va_end( arglist );
 
-			///////
+			if ( g_log_buffer_offset >= LOG_BUFFER_SIZE )
+			{
+				g_log_buffer_offset = LOG_BUFFER_SIZE - 1;
+			}
 
-			DWORD written = 0;
-			WriteFile( hFile_log, g_log_buffer, g_log_buffer_offset, &written, NULL );
-			g_log_buffer_offset = 0;
+			// Line terminator, written directly so a nearly full buffer cannot make memcpy_s
+			// fail (or call the invalid parameter handler) because of a 1 byte remainder.
+			if ( ( g_log_buffer_offset + 2 ) <= LOG_BUFFER_SIZE )
+			{
+				g_log_buffer[ g_log_buffer_offset ] = '\r';
+				g_log_buffer[ g_log_buffer_offset + 1 ] = '\n';
+
+				g_log_buffer_offset += 2;
+			}
+
+			if ( g_log_buffer_offset >= LOG_FLUSH_THRESHOLD )
+			{
+				FlushLogLocked();
+			}
 		}
 
 		LeaveCriticalSection( &logging_cs );

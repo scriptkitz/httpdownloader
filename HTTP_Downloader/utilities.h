@@ -155,7 +155,17 @@ void OpenLog( wchar_t *file_path, unsigned int log_filter );
 void CloseLog();
 void WriteLog( unsigned int type, const char *format, ... );
 
+// Push whatever is buffered to the log file. WriteLog only appends to memory and flushes on
+// its own when the buffer gets close to full, so the caller (the once-a-second UI tick)
+// decides when the disk sees the data. That keeps blocking file I/O off the IOCP threads,
+// which otherwise serialise on logging_cs every time they emit a line.
+void FlushLog();
+
 #define LOG_BUFFER_SIZE	65536
+
+// Flush from WriteLog when less than this much room is left, so a line can never overflow
+// the buffer between ticks.
+#define LOG_FLUSH_THRESHOLD	( LOG_BUFFER_SIZE - 8192 )
 
 extern char *g_log_buffer;
 extern unsigned int g_log_buffer_offset;
