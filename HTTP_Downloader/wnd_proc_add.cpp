@@ -440,6 +440,81 @@ static int GetAddProxyComboIndexFromType( unsigned char proxy_type )
 	return 2 + proxy_count + proxy_type - 1;
 }
 
+// Copied strings must be owned by the PROXY_INFO (FreeProxyInfo releases them), so the entry's
+// pointers cannot be shared.
+static wchar_t *DuplicateProxyString( const wchar_t *src )
+{
+	if ( src == NULL )
+	{
+		return NULL;
+	}
+
+	int length = lstrlenW( src ) + 1;
+	wchar_t *copy = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * length );
+
+	if ( copy != NULL )
+	{
+		_wmemcpy_s( copy, length, src, length );
+	}
+
+	return copy;
+}
+
+static char *DuplicateProxyStringUtf8( const wchar_t *src )
+{
+	if ( src == NULL )
+	{
+		return NULL;
+	}
+
+	int length = WideCharToMultiByte( CP_UTF8, 0, src, -1, NULL, 0, NULL, NULL );
+	char *copy = ( char * )GlobalAlloc( GMEM_FIXED, sizeof( char ) * length );
+
+	if ( copy != NULL )
+	{
+		WideCharToMultiByte( CP_UTF8, 0, src, -1, copy, length, NULL, NULL );
+	}
+
+	return copy;
+}
+
+// Fill the per-download PROXY_INFO from an entry of the Options -> Proxy list.
+//
+// The combo box only carries a *type*, so selecting "geph" used to store "SOCKS v5 at
+// <empty host>:0" - the UI looked right and every connection failed. The address, the port
+// and the credentials have to be copied over explicitly.
+static void ApplyDefinedProxyToInfo( PROXY_ENTRY *entry, PROXY_INFO *info )
+{
+	if ( entry == NULL || info == NULL )
+	{
+		return;
+	}
+
+	info->type = ( unsigned char )( entry->type + 1 );	// PROXY_TYPE_* (0..3) -> PROXY_INFO type (1..4)
+	info->address_type = entry->address_type;
+	info->ip_address = entry->ip_address;
+	info->port = entry->port;
+	info->use_authentication = entry->use_authentication;
+	info->resolve_domain_names = entry->resolve_domain_names;
+
+	info->hostname = DuplicateProxyString( entry->hostname );
+	info->punycode_hostname = DuplicateProxyString( entry->punycode_hostname );
+	info->w_username = DuplicateProxyString( entry->username );
+	info->w_password = DuplicateProxyString( entry->password );
+
+	info->username = DuplicateProxyStringUtf8( entry->username );
+	info->password = DuplicateProxyStringUtf8( entry->password );
+
+	if ( info->username != NULL || info->password != NULL )
+	{
+		CreateBasicAuthorizationKey( ( info->username != NULL ? info->username : "" ),
+									 ( info->username != NULL ? lstrlenA( info->username ) : 0 ),
+									 ( info->password != NULL ? info->password : "" ),
+									 ( info->password != NULL ? lstrlenA( info->password ) : 0 ),
+									 &info->auth_key, &info->auth_key_length );
+	}
+}
+
 void ShowHideAddProxyWindows( int index )
 {
 	if ( index == 0 )
@@ -2085,6 +2160,8 @@ LRESULT CALLBACK AddURLsWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
 
 							// Map the combo selection to the per-download proxy type:
 							// [0] follow global, [1] direct, [2..] defined entries, then custom types.
+							bool proxy_from_defined_list = false;
+
 							{
 								int proxy_sel = ( int )_SendMessageW( g_hWnd_add_proxy_type, CB_GETCURSEL, 0, 0 );
 
@@ -2097,6 +2174,7 @@ LRESULT CALLBACK AddURLsWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
 								}
 
 								unsigned char proxy_type = 0;
+								PROXY_ENTRY *defined_proxy = NULL;
 
 								if ( proxy_sel == 1 )
 								{
@@ -2112,6 +2190,7 @@ LRESULT CALLBACK AddURLsWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
 									if ( proxy_entry != NULL )
 									{
 										proxy_type = ( unsigned char )( proxy_entry->type + 1 );	// 0..3 -> 1..4
+										defined_proxy = proxy_entry;	// Its address/port/credentials are copied below.
 									}
 								}
 								else if ( proxy_sel >= 2 + proxy_count )
@@ -2121,7 +2200,14 @@ LRESULT CALLBACK AddURLsWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
 
 								ai->proxy_info.type = proxy_type;
 
-								if ( proxy_type == PROXY_INFO_TYPE_DIRECT )
+								if ( defined_proxy != NULL )
+								{
+									// A name picked from the proxy list carries everything already.
+									ApplyDefinedProxyToInfo( defined_proxy, &ai->proxy_info );
+
+									proxy_from_defined_list = true;
+								}
+								else if ( proxy_type == PROXY_INFO_TYPE_DIRECT )
 								{
 									// A direct connection needs no parameters, but the download list
 									// format always stores an address and a port. Keep them neutral so
@@ -2132,7 +2218,11 @@ LRESULT CALLBACK AddURLsWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
 								}
 							}
 
-							if ( ai->proxy_info.type != 0 && ai->proxy_info.type != PROXY_INFO_TYPE_DIRECT )
+							// Only the "Custom: ..." entries take their parameters from the controls.
+							// A proxy picked from the list already filled them in above, and reading
+							// the (untouched, empty) controls would overwrite them with host="" port=0.
+							if ( !proxy_from_defined_list &&
+								 ai->proxy_info.type != 0 && ai->proxy_info.type != PROXY_INFO_TYPE_DIRECT )
 							{
 								unsigned int hostname_length;
 

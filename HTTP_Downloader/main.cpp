@@ -998,6 +998,15 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		g_shutdown_action = cfg_shutdown_action;
 	}
 
+#ifdef ENABLE_LOGGING
+	// One line with the settings that decide retry/timeout behaviour: when a download stops
+	// early the log can be read without guessing what the limits were.
+	WriteLog( LOG_INFO_MISC, "[CONFIG] timeout=%u retries(downloads/parts)=%u/%u parts=%u redirects=%u non200=%d reallocate=%d/%llu",
+		(unsigned int)cfg_timeout, (unsigned int)cfg_retry_downloads_count, (unsigned int)cfg_retry_parts_count,
+		(unsigned int)cfg_default_download_parts, (unsigned int)cfg_max_redirects,
+		( cfg_download_non_200_206 ? 1 : 0 ), ( cfg_reallocate_parts ? 1 : 0 ), cfg_reallocate_threshold_size );
+#endif
+
 	if ( cla != NULL )
 	{
 		if ( g_can_use_tls_1_3 && cla->ssl_version >= 6 ) { cla->ssl_version = 6; }	// TLS 1.3

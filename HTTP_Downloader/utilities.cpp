@@ -3125,6 +3125,17 @@ void ConstructSOCKSRequest( SOCKET_CONTEXT *context, unsigned char request_type 
 		}
 	}
 
+#ifdef ENABLE_LOGGING
+	if ( _socks_type == SOCKS_TYPE_V5 && request_length > 0 )
+	{
+		WriteLog( LOG_INFO_CON_STATE, "[SOCKS] send req=%u len=%u host=%s port=%u resolve=%d auth=%d",
+			(unsigned int)request_type, request_length,
+			( context->request_info.host != NULL ? context->request_info.host : "" ),
+			(unsigned int)context->request_info.port,
+			( _resolve_domain_names ? 1 : 0 ), ( _use_authentication ? 1 : 0 ) );
+	}
+#endif
+
 	context->wsabuf.len = request_length;
 }
 

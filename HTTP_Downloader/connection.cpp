@@ -2322,6 +2322,13 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 					{
 						context->timed_out = TIME_OUT_RETRY;
 
+#ifdef ENABLE_LOGGING
+						WriteLog( LOG_WARNING, "[CONNECT] failed: err=%d host=%s port=%u status=%08x",
+							(int)GetLastError(),
+							( context->request_info.host != NULL ? context->request_info.host : "" ),
+							(unsigned int)context->request_info.port, context->status );
+#endif
+
 						if ( IS_STATUS( context->status, STATUS_PAUSED ) )
 						{
 							context->is_paused = true;	// Tells us how to stop the download if it's pausing/paused.
@@ -3504,6 +3511,11 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 					else if ( scRet != SEC_I_CONTINUE_NEEDED && scRet != SEC_E_INCOMPLETE_MESSAGE && scRet != SEC_I_INCOMPLETE_CREDENTIALS )
 					{
 						// Have seen SEC_E_ILLEGAL_MESSAGE (for a bad target name in InitializeSecurityContext), SEC_E_BUFFER_TOO_SMALL, and SEC_E_MESSAGE_ALTERED.
+#ifdef ENABLE_LOGGING
+						WriteLog( LOG_WARNING, "[TLS] handshake failed: scRet=%08x op=%d host=%s",
+							(unsigned int)scRet, (int)( *current_operation ),
+							( context->request_info.host != NULL ? context->request_info.host : "" ) );
+#endif
 
 						InterlockedIncrement( &context->pending_operations );
 						*current_operation = IO_Close;
@@ -3887,6 +3899,20 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 					context->wsabuf.buf[ context->current_bytes_read ] = 0;	// Sanity.
 
+#ifdef ENABLE_LOGGING
+					{
+						unsigned char b0 = ( context->current_bytes_read > 0 ? (unsigned char)context->wsabuf.buf[ 0 ] : 0 );
+						unsigned char b1 = ( context->current_bytes_read > 1 ? (unsigned char)context->wsabuf.buf[ 1 ] : 0 );
+						unsigned char b2 = ( context->current_bytes_read > 2 ? (unsigned char)context->wsabuf.buf[ 2 ] : 0 );
+						unsigned char b3 = ( context->current_bytes_read > 3 ? (unsigned char)context->wsabuf.buf[ 3 ] : 0 );
+
+						WriteLog( LOG_INFO_CON_STATE,
+							"[SOCKS] recv state=%d bytes=%u resp=%02x %02x %02x %02x",
+							(int)context->content_status, (unsigned int)context->current_bytes_read,
+							b0, b1, b2, b3 );
+					}
+#endif
+
 					if ( context->content_status == SOCKS_STATUS_REQUEST_AUTH )
 					{
 						if ( context->current_bytes_read < 2 )	// Request more data.
@@ -4081,6 +4107,17 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				// If something failed.
 				if ( connection_status == 1 )
 				{
+#ifdef ENABLE_LOGGING
+					{
+						unsigned char b0 = ( context->current_bytes_read > 0 ? (unsigned char)context->wsabuf.buf[ 0 ] : 0 );
+						unsigned char b1 = ( context->current_bytes_read > 1 ? (unsigned char)context->wsabuf.buf[ 1 ] : 0 );
+
+						WriteLog( LOG_INFO_CON_STATE,
+							"[SOCKS] FAIL state=%d bytes=%u resp=%02x %02x status=%08x",
+							(int)context->content_status, (unsigned int)context->current_bytes_read,
+							b0, b1, context->status );
+					}
+#endif
 					*current_operation = IO_Close;
 					PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
 				}
@@ -5039,7 +5076,14 @@ bool CreateConnection( SOCKET_CONTEXT *context, char *host, unsigned short port 
 		{
 			_enable_proxy_socks = true;
 			_socks_type = SOCKS_TYPE_V5;
-			_resolve_domain_names = cfg_resolve_domain_names;
+
+			// Must match what ConstructSOCKSRequest() uses for the same task, otherwise the
+			// two disagree: here it decided whether to resolve the target locally, there it
+			// decided between a domain and an IP in the CONNECT request. Using the global
+			// option here meant a task proxy with "resolve on the proxy" still had its host
+			// resolved locally, and the CONNECT went out as an IP - which is not what the
+			// per-task proxy was configured for.
+			_resolve_domain_names = pi->resolve_domain_names;
 		}
 		else
 		{
@@ -5149,6 +5193,28 @@ bool CreateConnection( SOCKET_CONTEXT *context, char *host, unsigned short port 
 		}
 
 		nRet = _GetAddrInfoW( whost, wport, &hints, &context->address_info );
+
+#ifdef ENABLE_LOGGING
+		{
+			char narrow_host[ 256 ];
+
+			narrow_host[ 0 ] = 0;
+
+			if ( whost != NULL )
+			{
+				WideCharToMultiByte( CP_UTF8, 0, whost, -1, narrow_host, sizeof( narrow_host ), NULL, NULL );
+			}
+
+			WriteLog( LOG_INFO_CON_STATE, "[PROXY] connect target=%s:%u (socks=%d pi=%d global=%d resolve=%d) request=%s:%u",
+				narrow_host, (unsigned int)port,
+				( _enable_proxy_socks ? 1 : 0 ), ( pi != NULL ? 1 : 0 ),
+				( GetActiveProxyForProtocol( context->request_info.protocol ) != NULL ? 1 : 0 ),
+				( _resolve_domain_names ? 1 : 0 ),
+				( context->request_info.host != NULL ? context->request_info.host : "" ),
+				(unsigned int)context->request_info.port );
+		}
+#endif
+
 		if ( nRet == WSAHOST_NOT_FOUND )
 		{
 			use_ipv6 = true;
@@ -7976,12 +8042,12 @@ DWORD WINAPI AddURL( void *add_info )
 					proxy_info.password = u_ai.proxy_info.password;
 					proxy_info.resolve_domain_names = u_ai.proxy_info.resolve_domain_names;
 
-					proxy_hostname_length = lstrlenW( u_ai.proxy_info.hostname );
-					proxy_punycode_hostname_length = lstrlenW( u_ai.proxy_info.punycode_hostname );
-					proxy_w_username_length = lstrlenW( u_ai.proxy_info.w_username );
-					proxy_w_password_length = lstrlenW( u_ai.proxy_info.w_password );
-					proxy_username_length = lstrlenA( u_ai.proxy_info.username );
-					proxy_password_length = lstrlenA( u_ai.proxy_info.password );
+					proxy_hostname_length = ( u_ai.proxy_info.hostname != NULL ? lstrlenW( u_ai.proxy_info.hostname ) : 0 );
+					proxy_punycode_hostname_length = ( u_ai.proxy_info.punycode_hostname != NULL ? lstrlenW( u_ai.proxy_info.punycode_hostname ) : 0 );
+					proxy_w_username_length = ( u_ai.proxy_info.w_username != NULL ? lstrlenW( u_ai.proxy_info.w_username ) : 0 );
+					proxy_w_password_length = ( u_ai.proxy_info.w_password != NULL ? lstrlenW( u_ai.proxy_info.w_password ) : 0 );
+					proxy_username_length = ( u_ai.proxy_info.username != NULL ? lstrlenA( u_ai.proxy_info.username ) : 0 );
+					proxy_password_length = ( u_ai.proxy_info.password != NULL ? lstrlenA( u_ai.proxy_info.password ) : 0 );
 				}
 				else if ( is_group && g_ai.proxy_info.type != 0 )
 				{
@@ -7999,12 +8065,12 @@ DWORD WINAPI AddURL( void *add_info )
 					proxy_info.password = g_ai.proxy_info.password;
 					proxy_info.resolve_domain_names = g_ai.proxy_info.resolve_domain_names;
 
-					proxy_hostname_length = lstrlenW( g_ai.proxy_info.hostname );
-					proxy_punycode_hostname_length = lstrlenW( g_ai.proxy_info.punycode_hostname );
-					proxy_w_username_length = lstrlenW( g_ai.proxy_info.w_username );
-					proxy_w_password_length = lstrlenW( g_ai.proxy_info.w_password );
-					proxy_username_length = lstrlenA( g_ai.proxy_info.username );
-					proxy_password_length = lstrlenA( g_ai.proxy_info.password );
+					proxy_hostname_length = ( g_ai.proxy_info.hostname != NULL ? lstrlenW( g_ai.proxy_info.hostname ) : 0 );
+					proxy_punycode_hostname_length = ( g_ai.proxy_info.punycode_hostname != NULL ? lstrlenW( g_ai.proxy_info.punycode_hostname ) : 0 );
+					proxy_w_username_length = ( g_ai.proxy_info.w_username != NULL ? lstrlenW( g_ai.proxy_info.w_username ) : 0 );
+					proxy_w_password_length = ( g_ai.proxy_info.w_password != NULL ? lstrlenW( g_ai.proxy_info.w_password ) : 0 );
+					proxy_username_length = ( g_ai.proxy_info.username != NULL ? lstrlenA( g_ai.proxy_info.username ) : 0 );
+					proxy_password_length = ( g_ai.proxy_info.password != NULL ? lstrlenA( g_ai.proxy_info.password ) : 0 );
 				}
 				else if ( ai->proxy_info.type != 0 )
 				{
@@ -10037,7 +10103,13 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 
 				// Seal the range with the bytes actually stored, so the checks below behave the
 				// same way they do for a response that reported its size up front.
-				if ( unbounded_range && body_complete )
+				//
+				// Zero bytes is not a file: an actually empty body carries "Content-Length: 0"
+				// (handled in the header path). With no length and nothing received the server
+				// dropped the connection before sending anything, so the range stays unbounded and
+				// the retry logic below gets a chance - otherwise the download reported
+				// "Completed" for a 0 byte file.
+				if ( unbounded_range && body_complete && context->header_info.range_info->content_offset > 0 )
 				{
 					RANGE_INFO *sealed_ri = context->header_info.range_info;
 					unsigned long long sealed_size = sealed_ri->content_offset;
@@ -10047,7 +10119,7 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 					unbounded_range = false;
 
 					// The file size was unknown while downloading; now we know it.
-					if ( sealed_size > 0 && di->shared_info != NULL )
+					if ( di->shared_info != NULL )
 					{
 						EnterCriticalSection( &di->shared_info->di_cs );
 

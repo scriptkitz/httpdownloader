@@ -1148,6 +1148,16 @@ unsigned int DecompressStream( SOCKET_CONTEXT *context, char *buffer, unsigned i
 	int stream_ret = Z_OK;
 	unsigned int total_data_length = 0;
 
+	// zlib1.dll is optional. Without it these entry points are NULL, and calling them used to
+	// take the process down. Returning 0 leaves decompressed_buf NULL, which the callers treat
+	// as "no decoded data".
+#ifndef ZLIB1_USE_STATIC_LIB
+	if ( _inflateInit2_ == NULL || _inflate == NULL )
+	{
+		return 0;
+	}
+#endif
+
 	if ( context != NULL )
 	{
 		if ( context->decompressed_buf == NULL )
@@ -2923,6 +2933,22 @@ char ParseHTTPHeader( SOCKET_CONTEXT *context, char *header_buffer, unsigned int
 			context->header_info.content_encoding = GetContentEncoding( header_buffer );
 		}
 
+		// zlib1.dll is optional. Without it the body is stored as-is with a matching extension
+		// (.gz/.zlib) and a single connection - see the compression handling below. Just make it
+		// visible in the log, because the resulting file is the compressed stream, not the
+		// original document.
+#ifndef ZLIB1_USE_STATIC_LIB
+		if ( ( context->header_info.content_encoding == CONTENT_ENCODING_GZIP ||
+			   context->header_info.content_encoding == CONTENT_ENCODING_DEFLATE ) &&
+			 ( _inflateInit2_ == NULL || _inflate == NULL ) )
+		{
+#ifdef ENABLE_LOGGING
+			WriteLog( LOG_WARNING, "[COMPRESSION] response is %s-encoded but zlib1.dll is not loaded; saving the compressed stream",
+				( context->header_info.content_encoding == CONTENT_ENCODING_GZIP ? "gzip" : "deflate" ) );
+#endif
+		}
+#endif
+
 		if ( context->header_info.http_status == 401 )
 		{
 			if ( context->header_info.digest_info == NULL )
@@ -3337,6 +3363,25 @@ char GetHTTPHeader( SOCKET_CONTEXT *context, char *header_buffer, unsigned int h
 			// The connection will get closed in here.
 			return HandleRedirect( context );
 		}
+		else if ( context->header_info.http_status >= 300 && context->header_info.http_status <= 399 )
+		{
+			// A redirect we cannot follow: no Location, redirects disabled, or the limit was
+			// reached. Its body is empty, so treating it as file content produced a 0 byte
+			// download that reported "Completed" (seen on a GitHub release URL from history).
+			// Report the status code instead.
+			if ( context->download_info != NULL )
+			{
+				EnterCriticalSection( &context->download_info->di_cs );
+
+				context->download_info->code = context->header_info.http_status;
+
+				LeaveCriticalSection( &context->download_info->di_cs );
+			}
+
+			context->status = STATUS_FAILED;
+
+			return CONTENT_STATUS_FAILED;
+		}
 		else if ( context->header_info.http_status == 401 ||
 				  context->header_info.http_status == 407 )	// Handle authorization requests before processing any data.
 		{
@@ -3433,7 +3478,9 @@ char GetHTTPHeader( SOCKET_CONTEXT *context, char *header_buffer, unsigned int h
 				return CONTENT_STATUS_FAILED;
 			}
 		}
-		else if ( cfg_download_non_200_206 || context->header_info.http_status == 200 || context->header_info.http_status == 206 )
+		else if ( ( cfg_download_non_200_206 &&
+					  ( context->header_info.http_status < 300 || context->header_info.http_status > 399 ) ) ||
+				   context->header_info.http_status == 200 || context->header_info.http_status == 206 )
 		{
 			// Check the file size threshold (4GB).
 			if ( context->header_info.range_info->content_length > cfg_max_file_size )
@@ -3848,8 +3895,21 @@ char HandleRedirect( SOCKET_CONTEXT *context )
 			DLL_AddNode( &redirect_context->download_info->parts_list, &redirect_context->parts_node, -1 );
 
 			// Absolute URI redirection. See if the protocol, host, and port have changed.
+			//
+			// A proxy the user picked FOR THIS DOWNLOAD (proxy_info still pointing at
+			// saved_proxy_info, i.e. never replaced by a site rule) must survive the redirect.
+			// Clearing it dropped the task proxy the moment GitHub bounced to
+			// release-assets.githubusercontent.com, so the download silently fell back to the
+			// global proxy (or to a direct connection, which is simply blocked here).
+			DOWNLOAD_INFO *redirect_di = redirect_context->download_info;
+
+			bool redirect_has_task_proxy = ( redirect_di != NULL &&
+											 redirect_di->proxy_info != NULL &&
+											 redirect_di->proxy_info == redirect_di->saved_proxy_info );
+
 			if ( !cfg_apply_initial_proxy &&
 				 is_absolute_uri &&
+			   !redirect_has_task_proxy &&
 			   ( redirect_context->request_info.port != context->request_info.port ||
 				 redirect_context->request_info.protocol != context->request_info.protocol ||
 				 lstrcmpiA( redirect_context->request_info.host, context->request_info.host ) != 0 ) )
@@ -5384,16 +5444,21 @@ char GetHTTPResponseContent( SOCKET_CONTEXT *context, char *response_buffer, uns
 			response_buffer_length -= ( unsigned int )( context->header_info.end_of_header - response_buffer );
 			response_buffer = context->header_info.end_of_header;
 
-			// Handle zero byte files. Only a response that explicitly said "Content-Length: 0"
-			// is empty: with no length header at all the body is still on its way and the fact
-			// that it has not arrived in the same TCP segment means nothing.
+			// Handle zero byte files. A response is empty when it said "Content-Length: 0" or
+			// when its status forbids a body (204 No Content / 205 Reset Content - those often
+			// carry no length at all). With no length header and a normal status the body is
+			// still on its way, and the fact that it has not arrived in the same TCP segment
+			// means nothing.
+			bool empty_by_status = ( context->header_info.http_status == 204 ||
+									 context->header_info.http_status == 205 );
+
 			if ( response_buffer_length == 0 &&
 				 context->header_info.range_info->content_length == 0 &&
-				 context->header_info.has_content_length &&
+				 ( context->header_info.has_content_length || empty_by_status ) &&
 				!context->header_info.chunked_transfer &&
 				 context->header_info.content_encoding == CONTENT_ENCODING_NONE )
 			{
-				// No body and no length: the response is simply empty. Give the range a real
+				// No body: the response is simply empty. Give the range a real
 				// (one byte, already complete) length so it is not mistaken for an unbounded
 				// body that still has data to come.
 				context->header_info.range_info->content_length = 1;
