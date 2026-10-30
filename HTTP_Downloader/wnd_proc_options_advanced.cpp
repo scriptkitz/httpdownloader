@@ -718,7 +718,13 @@ LRESULT CALLBACK AdvancedTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 					if ( directory != NULL )
 					{
 						GlobalFree( t_default_download_directory );
-						t_default_download_directory = directory;
+
+						// Store/display the variable form ("%USERPROFILE%\Downloads") so a copied
+						// configuration still resolves on another account or machine.
+						t_default_download_directory = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * MAX_PATH );
+						CollapseDownloadDirectory( directory, t_default_download_directory, MAX_PATH );
+
+						GlobalFree( directory );
 
 						_SendMessageW( g_hWnd_default_download_directory, WM_SETTEXT, 0, ( LPARAM )t_default_download_directory );
 

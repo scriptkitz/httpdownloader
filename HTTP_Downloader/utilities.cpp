@@ -3237,6 +3237,7 @@ unsigned int FormatSizesA( char *buffer, unsigned int buffer_size, unsigned char
 	return length;
 }
 
+// ---------------------------------------------------------------------------------------------
 void GetDownloadStatus( char *buf, unsigned short buf_size, unsigned int status )
 {
 	unsigned short offset = 0;
@@ -3661,3 +3662,209 @@ void WriteLog( unsigned int type, const char *format, ... )
 }
 
 #endif
+
+// Download directory helpers
+//
+// The configured download directory is stored and displayed with environment variables in it
+// ("%USERPROFILE%\Downloads"), so a configuration file copied to another machine or used by a
+// different account still points at that machine's folder. The real path is produced right
+// before the file system is touched.
+// ---------------------------------------------------------------------------------------------
+
+// Case-insensitive prefix comparison that respects path boundaries: "C:\Users\bob2" must not
+// match the prefix "C:\Users\bob".
+static bool DirectoryPrefixMatch( const wchar_t *path, const wchar_t *prefix )
+{
+	unsigned int i = 0;
+
+	if ( path == NULL || prefix == NULL )
+	{
+		return false;
+	}
+
+	while ( prefix[ i ] != 0 )
+	{
+		wchar_t a = path[ i ];
+		wchar_t b = prefix[ i ];
+
+		if ( a >= L'A' && a <= L'Z' ) { a = ( wchar_t )( a + 32 ); }
+		if ( b >= L'A' && b <= L'Z' ) { b = ( wchar_t )( b + 32 ); }
+
+		if ( a != b )
+		{
+			return false;
+		}
+
+		++i;
+	}
+
+	return ( path[ i ] == 0 || path[ i ] == L'\\' );
+}
+
+unsigned int ExpandDownloadDirectory( const wchar_t *src, wchar_t *dest, unsigned int dest_count )
+{
+	if ( dest == NULL || dest_count == 0 )
+	{
+		return 0;
+	}
+
+	dest[ 0 ] = 0;
+
+	if ( src == NULL || src[ 0 ] == 0 )
+	{
+		return 0;
+	}
+
+	DWORD written = ExpandEnvironmentStringsW( src, dest, dest_count );
+
+	if ( written == 0 || written > dest_count )
+	{
+		// Nothing to expand, or the result did not fit: hand back the original so the caller
+		// still has something usable (and the existence check reports the right path).
+		unsigned int length = lstrlenW( src );
+
+		if ( length >= dest_count )
+		{
+			length = dest_count - 1;
+		}
+
+		_wmemcpy_s( dest, dest_count, src, length );
+		dest[ length ] = 0;
+	}
+
+	return lstrlenW( dest );
+}
+
+unsigned int CollapseDownloadDirectory( const wchar_t *src, wchar_t *dest, unsigned int dest_count )
+{
+	if ( dest == NULL || dest_count == 0 )
+	{
+		return 0;
+	}
+
+	dest[ 0 ] = 0;
+
+	if ( src == NULL || src[ 0 ] == 0 )
+	{
+		return 0;
+	}
+
+	// Already in variable form (either written by hand or loaded from the settings file).
+	bool has_variable = false;
+
+	for ( const wchar_t *scan = src; *scan != 0; ++scan )
+	{
+		if ( *scan == L'%' )
+		{
+			has_variable = true;
+
+			break;
+		}
+	}
+
+	if ( lstrlenW( src ) < ( int )dest_count && has_variable )
+	{
+		_wmemcpy_s( dest, dest_count, src, lstrlenW( src ) );
+		dest[ lstrlenW( src ) ] = 0;
+
+		return lstrlenW( dest );
+	}
+
+	// Longest roots first: LOCALAPPDATA must win over the APPDATA check, and ProgramData over
+	// SystemDrive, otherwise "%APPDATA%Data" style paths would be produced.
+	static const wchar_t *variables[] = { L"USERPROFILE", L"LOCALAPPDATA", L"APPDATA", L"ProgramData", L"SystemDrive" };
+	static const unsigned int variable_count = sizeof( variables ) / sizeof( variables[ 0 ] );
+
+	wchar_t value[ MAX_PATH ];
+
+	for ( unsigned int i = 0; i < variable_count; ++i )
+	{
+		DWORD value_length = GetEnvironmentVariableW( variables[ i ], value, MAX_PATH );
+
+		if ( value_length == 0 || value_length >= MAX_PATH )
+		{
+			continue;
+		}
+
+		// Ignore a trailing separator in the environment value so "%USERPROFILE%\..." never
+		// becomes "%USERPROFILE%\\...".
+		while ( value_length > 0 && value[ value_length - 1 ] == L'\\' )
+		{
+			value[ --value_length ] = 0;
+		}
+
+		if ( value_length == 0 || !DirectoryPrefixMatch( src, value ) )
+		{
+			continue;
+		}
+
+		const wchar_t *rest = src + value_length;
+
+		// Built by hand instead of a printf: swprintf_s terminates the process when the result
+		// does not fit, and a deep path can be longer than the buffer. An empty rest simply
+		// yields "%VAR%".
+		{
+			unsigned int pos = 0;
+
+			dest[ pos++ ] = L'%';
+
+			for ( const wchar_t *scan = variables[ i ]; *scan != 0 && pos + 1 < dest_count; ++scan )
+			{
+				dest[ pos++ ] = *scan;
+			}
+
+			if ( pos + 1 < dest_count ) { dest[ pos++ ] = L'%'; }
+
+			for ( const wchar_t *scan = rest; *scan != 0 && pos + 1 < dest_count; ++scan )
+			{
+				dest[ pos++ ] = *scan;
+			}
+
+			dest[ pos ] = 0;
+		}
+
+		dest[ dest_count - 1 ] = 0;	// Sanity.
+
+		return lstrlenW( dest );
+	}
+
+	// A plain path on some other drive: keep it as it is.
+	{
+		unsigned int length = lstrlenW( src );
+
+		if ( length >= dest_count )
+		{
+			length = dest_count - 1;
+		}
+
+		_wmemcpy_s( dest, dest_count, src, length );
+		dest[ length ] = 0;
+	}
+
+	return lstrlenW( dest );
+}
+
+bool CheckDownloadDirectory( const wchar_t *stored, wchar_t *resolved, unsigned int resolved_count )
+{
+	if ( resolved == NULL || resolved_count == 0 )
+	{
+		return false;
+	}
+
+	ExpandDownloadDirectory( stored, resolved, resolved_count );
+
+	if ( resolved[ 0 ] == 0 )
+	{
+		return false;
+	}
+
+	DWORD attributes = GetFileAttributesW( resolved );
+
+	if ( attributes == INVALID_FILE_ATTRIBUTES )
+	{
+		return false;
+	}
+
+	return ( ( attributes & FILE_ATTRIBUTE_DIRECTORY ) != 0 );
+}
+

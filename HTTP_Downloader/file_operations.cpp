@@ -1048,6 +1048,22 @@ RETRY_OPEN:
 									cfg_default_download_directory = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * cfg_val_length );
 									MultiByteToWideChar( CP_UTF8, 0, next, string_length, cfg_default_download_directory, cfg_val_length );
 
+									// Files written by older versions hold the absolute path. Normalise
+									// to the variable form so the value survives being copied to a
+									// machine with a different user name, and so the UI shows it that
+									// way. The real path is produced where the file is opened.
+									{
+										wchar_t collapsed[ MAX_PATH ];
+
+										CollapseDownloadDirectory( cfg_default_download_directory, collapsed, MAX_PATH );
+
+										GlobalFree( cfg_default_download_directory );
+
+										cfg_val_length = lstrlenW( collapsed ) + 1;
+										cfg_default_download_directory = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * cfg_val_length );
+										_wmemcpy_s( cfg_default_download_directory, cfg_val_length, collapsed, cfg_val_length );
+									}
+
 									g_default_download_directory_length = cfg_val_length - 1;	// Store the base directory length.
 								}
 
@@ -1251,10 +1267,27 @@ RETRY_OPEN:
 			cfg_default_download_directory[ MAX_PATH - 1 ] = 0;	// Sanity.
 		}
 
-		// Check to see if the new path exists and create it if it doesn't.
-		if ( GetFileAttributesW( cfg_default_download_directory ) == INVALID_FILE_ATTRIBUTES )
+		// Store the variable form ("%USERPROFILE%\Downloads") so the setting keeps working when
+		// the configuration is copied to another machine or used by another account. Only the
+		// existence check below needs a real path.
 		{
-			CreateDirectoryW( cfg_default_download_directory, NULL );
+			wchar_t collapsed[ MAX_PATH ];
+
+			CollapseDownloadDirectory( cfg_default_download_directory, collapsed, MAX_PATH );
+
+			_wmemcpy_s( cfg_default_download_directory, MAX_PATH, collapsed, lstrlenW( collapsed ) + 1 );
+
+			g_default_download_directory_length = lstrlenW( cfg_default_download_directory );
+		}
+
+		// Check to see if the new path exists and create it if it doesn't (with %VAR% expanded).
+		{
+			wchar_t resolved[ MAX_PATH ];
+
+			if ( !CheckDownloadDirectory( cfg_default_download_directory, resolved, MAX_PATH ) )
+			{
+				CreateDirectoryW( resolved, NULL );
+			}
 		}
 	}
 

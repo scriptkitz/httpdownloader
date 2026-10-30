@@ -177,5 +177,18 @@ void GetDownloadStatus( char *buf, unsigned short buf_size, unsigned int status 
 void GenericLogEntry( DOWNLOAD_INFO *di, unsigned int type, char *msg );
 
 #endif
+// Download directories may contain environment variables (e.g. %USERPROFILE%\Downloads) so the
+// same configuration keeps working on another machine or user account. Values are stored and
+// displayed in that form and expanded right before they are used.
+//
+// Expand: %VAR% -> absolute path. Unknown variables are left untouched.
+// Collapse: absolute path -> %VAR%\sub. Only well known roots (%USERPROFILE%, %APPDATA%, ...)
+//   are rewritten; a directory on a custom drive keeps its literal path.
+// Check: expand, then verify the result exists and is a directory. resolved always receives the
+//   expanded path (also when the check fails) so the caller can show it in an error message.
+unsigned int ExpandDownloadDirectory( const wchar_t *src, wchar_t *dest, unsigned int dest_count );
+unsigned int CollapseDownloadDirectory( const wchar_t *src, wchar_t *dest, unsigned int dest_count );
+bool CheckDownloadDirectory( const wchar_t *stored, wchar_t *resolved, unsigned int resolved_count );
+
 
 #endif

@@ -2216,7 +2216,12 @@ LRESULT CALLBACK SiteManagerWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 					if ( directory != NULL )
 					{
 						GlobalFree( t_sm_download_directory );
-						t_sm_download_directory = directory;
+
+						// Keep the variable form so the site entry works on another machine.
+						t_sm_download_directory = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * MAX_PATH );
+						CollapseDownloadDirectory( directory, t_sm_download_directory, MAX_PATH );
+
+						GlobalFree( directory );
 
 						_SendMessageW( g_hWnd_sm_download_directory, WM_SETTEXT, 0, ( LPARAM )t_sm_download_directory );
 					}

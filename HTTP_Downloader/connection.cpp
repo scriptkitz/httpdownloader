@@ -5781,6 +5781,43 @@ void StartDownload( DOWNLOAD_INFO *di, unsigned char start_type, unsigned char s
 		return;
 	}
 
+	// Verify the destination before a single byte is requested. A task restored from history can
+	// point at a folder that is gone here (configuration copied from another machine, a removed
+	// directory, an unplugged drive); without this the download only failed later with a generic
+	// "File IO Error" while creating the file.
+	if ( di->shared_info != NULL &&
+		 IS_STATUS_NOT( di->shared_info->download_operations, DOWNLOAD_OPERATION_SIMULATE ) &&
+		 di->shared_info->file_path[ 0 ] != 0 )
+	{
+		wchar_t directory[ MAX_PATH ];
+		wchar_t resolved[ MAX_PATH ];
+
+		unsigned int directory_length = ( di->shared_info->filename_offset > 0 ? di->shared_info->filename_offset - 1 : 0 );
+
+		if ( directory_length >= MAX_PATH )
+		{
+			directory_length = MAX_PATH - 1;
+		}
+
+		_wmemcpy_s( directory, MAX_PATH, di->shared_info->file_path, directory_length );
+		directory[ directory_length ] = 0;
+
+		if ( !CheckDownloadDirectory( directory, resolved, MAX_PATH ) )
+		{
+#ifdef ENABLE_LOGGING
+			char narrow_path[ MAX_PATH ];
+
+			narrow_path[ 0 ] = 0;
+			WideCharToMultiByte( CP_UTF8, 0, resolved, -1, narrow_path, MAX_PATH, NULL, NULL );
+
+			WriteLog( LOG_ERROR, "[DIR] refusing to start, download directory does not exist: %s", narrow_path );
+#endif
+			SetStatus( di, STATUS_FILE_IO_ERROR );
+
+			return;
+		}
+	}
+
 	unsigned char add_state = 0;
 
 	PROTOCOL protocol = PROTOCOL_UNKNOWN;
@@ -8233,8 +8270,42 @@ DWORD WINAPI AddURL( void *add_info )
 
 							if ( !( download_operations & DOWNLOAD_OPERATION_SIMULATE ) )
 							{
-								di->shared_info->filename_offset = lstrlenW( download_directory );
-								_wmemcpy_s( di->shared_info->file_path, MAX_PATH, download_directory, di->shared_info->filename_offset );
+								// The configured directory may be stored as "%USERPROFILE%\Downloads".
+								// Expand it once here: everything downstream (file_path, the part
+								// files, the move-to-category step) works on the real path.
+								wchar_t resolved_directory[ MAX_PATH ];
+
+								bool directory_ready = CheckDownloadDirectory( download_directory, resolved_directory, MAX_PATH );
+
+								if ( !directory_ready )
+								{
+									// Configuration copied from another machine, a removed folder or
+									// an unplugged drive used to surface much later as a generic
+									// "File IO Error" while creating the file. Try to create it and
+									// name the path in the log either way.
+									if ( CreateDirectoryW( resolved_directory, NULL ) == FALSE &&
+										 GetLastError() != ERROR_ALREADY_EXISTS )
+									{
+#ifdef ENABLE_LOGGING
+										char narrow_path[ MAX_PATH ];
+
+										narrow_path[ 0 ] = 0;
+										WideCharToMultiByte( CP_UTF8, 0, resolved_directory, -1, narrow_path, MAX_PATH, NULL, NULL );
+
+										WriteLog( LOG_ERROR, "[DIR] download directory is missing and cannot be created: %s (error %u)",
+											narrow_path, (unsigned int)GetLastError() );
+#endif
+									}
+								}
+								else
+								{
+									directory_ready = true;	// Exists: nothing to report.
+								}
+
+								const wchar_t *final_directory = ( resolved_directory[ 0 ] != 0 ? resolved_directory : download_directory );
+
+								di->shared_info->filename_offset = lstrlenW( final_directory );
+								_wmemcpy_s( di->shared_info->file_path, MAX_PATH, final_directory, di->shared_info->filename_offset );
 								di->shared_info->file_path[ di->shared_info->filename_offset ] = 0;	// Sanity.
 
 								++di->shared_info->filename_offset;	// Include the NULL terminator.
