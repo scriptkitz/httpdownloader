@@ -17,7 +17,17 @@ rem  and are not needed for an x64 build.
 rem ============================================================
 setlocal enabledelayedexpansion
 
-set "MSVC_DIR=D:\Program Files\Microsoft Visual Studio\18\Professional\VC\Tools\MSVC\14.51.36231"
+rem Pick the newest installed MSVC toolset. VS updates remove the previous one, which used to
+rem break this script with a bare "cl is not recognized".
+set "MSVC_ROOT=D:\Program Files\Microsoft Visual Studio\18\Professional\VC\Tools\MSVC"
+set "MSVC_DIR="
+for /f "delims=" %%v in ('dir /b /ad /o-n "%MSVC_ROOT%\14.*" 2^>nul') do (
+    if not defined MSVC_DIR if exist "%MSVC_ROOT%\%%v\bin\Hostx64\x64\cl.exe" set "MSVC_DIR=%MSVC_ROOT%\%%v"
+)
+if not defined MSVC_DIR (
+    echo MSVC toolset not found under "%MSVC_ROOT%".
+    exit /b 1
+)
 set "SDK_VER=10.0.26100.0"
 set "SDK_DIR=D:\Windows Kits\10"
 

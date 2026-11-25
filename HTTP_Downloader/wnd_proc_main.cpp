@@ -98,6 +98,11 @@ bool last_menu = false;					// true if context menu was last open, false if main
 HANDLE g_timer_semaphore = NULL;
 HANDLE g_timer_exit_semaphore = NULL;
 
+// Periodic download-history save. The timer thread only posts a message; the file itself is
+// written on the UI thread because the download list is not safe to walk from another thread.
+volatile LONG g_history_save_pending = 0;
+static ULONGLONG g_last_history_save = 0;
+
 bool use_drag_and_drop_main = true;		// Assumes OLE32_STATE_RUNNING is true.
 IDropTarget *List_DropTarget;
 IDropTarget *Tree_DropTarget;
@@ -412,6 +417,25 @@ DWORD WINAPI UpdateWindow( LPVOID /*WorkThreadContext*/ )
 		// a second, so IOCP threads never wait on the log file's I/O.
 		FlushLog();
 #endif
+
+		// Persist the history every 30 seconds while a download is running, so a crash costs at
+		// most that much progress instead of everything since the last add/remove/exit.
+		{
+			ULONGLONG history_now = GetTickCount64();
+
+			if ( cfg_enable_download_history &&
+				 ( g_download_history_changed || g_total_downloading > 0 ) &&
+				 ( g_last_history_save == 0 || history_now - g_last_history_save >= 30000 ) &&
+				 InterlockedCompareExchange( &g_history_save_pending, 1, 0 ) == 0 )
+			{
+				g_last_history_save = history_now;
+
+				if ( PostMessageW( g_hWnd_main, WM_SAVE_HISTORY, 0, 0 ) == FALSE )
+				{
+					InterlockedExchange( &g_history_save_pending, 0 );	// Window is gone; don't wedge.
+				}
+			}
+		}
 
 		g_session_downloaded_speed = 0;
 
@@ -3453,6 +3477,31 @@ LRESULT CALLBACK MainWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam 
 			if ( di != NULL )
 			{
 				di->print_range_list = NULL;
+			}
+
+			return TRUE;
+		}
+		break;
+
+		case WM_SAVE_HISTORY:
+		{
+			// Periodic save while downloading (posted by the one-second timer thread). Without
+			// this the file was only written on add/remove/exit, so a crash lost every progress
+			// update since the last of those - two hours of downloading in the reported case.
+			InterlockedExchange( &g_history_save_pending, 0 );
+
+			if ( cfg_enable_download_history &&
+				 ( g_download_history_changed || g_total_downloading > 0 ) )
+			{
+				wchar_t history_path[ MAX_PATH ];
+
+				_wmemcpy_s( history_path, MAX_PATH, g_base_directory, g_base_directory_length );
+				_wmemcpy_s( history_path + g_base_directory_length, MAX_PATH - g_base_directory_length, L"\\download_history\0", 18 );
+
+				if ( save_download_history( history_path ) == 0 )
+				{
+					g_download_history_changed = false;
+				}
 			}
 
 			return TRUE;

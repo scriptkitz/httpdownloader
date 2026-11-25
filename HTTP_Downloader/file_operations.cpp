@@ -3535,9 +3535,26 @@ char save_download_history( wchar_t *file_path )
 
 	HANDLE hFile_downloads = INVALID_HANDLE_VALUE;
 
+	// Written to a temporary file and moved into place at the end. The history is now saved
+	// periodically while downloading, so a crash in the middle of a write would otherwise
+	// leave a truncated (or completely empty) file and lose everything that was recorded.
+	wchar_t temp_path[ MAX_PATH + 8 ];
+
+	{
+		int path_length = lstrlenW( file_path );
+
+		if ( path_length > MAX_PATH - 1 )
+		{
+			path_length = MAX_PATH - 1;
+		}
+
+		_wmemcpy_s( temp_path, MAX_PATH + 8, file_path, path_length );
+		_wmemcpy_s( temp_path + path_length, MAX_PATH + 8 - path_length, L".tmp\0", 5 );
+	}
+
 RETRY_OPEN:
 
-	hFile_downloads = CreateFile( file_path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
+	hFile_downloads = CreateFile( temp_path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
 	if ( hFile_downloads != INVALID_HANDLE_VALUE )
 	{
 		OVERLAPPED lfo;
@@ -3998,6 +4015,18 @@ RETRY_OPEN:
 		UnlockFileEx( hFile_downloads, 0, MAXDWORD, MAXDWORD, &lfo );
 
 		CloseHandle( hFile_downloads );
+
+		// Swap the finished file into place. On failure the previous history is left intact and
+		// the stale temporary file is removed.
+		if ( MoveFileExW( temp_path, file_path, MOVEFILE_REPLACE_EXISTING ) == FALSE )
+		{
+#ifdef ENABLE_LOGGING
+			WriteLog( LOG_WARNING, "Could not replace download history (error %u)", (unsigned int)GetLastError() );
+#endif
+			DeleteFileW( temp_path );
+
+			ret_status = -1;
+		}
 	}
 	else
 	{

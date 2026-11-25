@@ -108,6 +108,10 @@ struct PROXY_ENTRY
 
 #define WM_PEER_CONNECTED	WM_APP + 12
 
+// Posted by the one-second timer thread so the history is written on the UI thread (the
+// download list can only be walked safely there).
+#define WM_SAVE_HISTORY		WM_APP + 13
+
 #define FILETIME_TICKS_PER_SECOND	10000000LL
 
 #define NUM_COLUMNS			17
