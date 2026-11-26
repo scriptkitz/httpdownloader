@@ -384,7 +384,7 @@ SECURITY_STATUS SSL_WSAAccept( SOCKET_CONTEXT *context, OVERLAPPEDEX *overlapped
 			encrypted_buf.buf = ( char * )_ssl_s->pbIoBuffer + _ssl_s->cbIoBuffer;
 			encrypted_buf.len = _ssl_s->sbIoBuffer - _ssl_s->cbIoBuffer;
 
-			nRet = _WSARecv( _ssl_s->s, &encrypted_buf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+			nRet = ContextRecv( context, &encrypted_buf, ( WSAOVERLAPPED * )overlapped );
 			if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 			{
 				sent = false;
@@ -491,7 +491,7 @@ SECURITY_STATUS SSL_WSAAccept_Reply( SOCKET_CONTEXT *context, OVERLAPPEDEX *over
 
 					overlapped->current_operation = IO_Write;
 
-					nRet = _WSASend( _ssl_s->s, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+					nRet = ContextSend( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped, dwFlags );
 					if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 					{
 						sent = false;
@@ -618,7 +618,7 @@ SECURITY_STATUS SSL_WSAAccept_Response( SOCKET_CONTEXT *context, OVERLAPPEDEX *o
 						encrypted_buf.buf = ( char * )_ssl_s->pbIoBuffer + _ssl_s->cbIoBuffer;
 						encrypted_buf.len = _ssl_s->sbIoBuffer - _ssl_s->cbIoBuffer;
 
-						nRet = _WSARecv( _ssl_s->s, &encrypted_buf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+						nRet = ContextRecv( context, &encrypted_buf, ( WSAOVERLAPPED * )overlapped );
 						if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 						{
 							sent = false;
@@ -758,7 +758,7 @@ SECURITY_STATUS SSL_WSAConnect( SOCKET_CONTEXT *context, OVERLAPPEDEX *overlappe
 
 			overlapped->current_operation = IO_Write;
 
-			nRet = _WSASend( _ssl_s->s, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+			nRet = ContextSend( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped, dwFlags );
 			if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 			{
 				sent = false;
@@ -851,7 +851,7 @@ SECURITY_STATUS SSL_WSAConnect_Response( SOCKET_CONTEXT *context, OVERLAPPEDEX *
 						encrypted_buf.buf = ( char * )_ssl_s->pbIoBuffer + _ssl_s->cbIoBuffer;
 						encrypted_buf.len = _ssl_s->sbIoBuffer - _ssl_s->cbIoBuffer;
 
-						nRet = _WSARecv( _ssl_s->s, &encrypted_buf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+						nRet = ContextRecv( context, &encrypted_buf, ( WSAOVERLAPPED * )overlapped );
 						if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 						{
 							sent = false;
@@ -1018,7 +1018,7 @@ SECURITY_STATUS SSL_WSAConnect_Reply( SOCKET_CONTEXT *context, OVERLAPPEDEX *ove
 
 					overlapped->current_operation = IO_Write;
 
-					nRet = _WSASend( _ssl_s->s, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+					nRet = ContextSend( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped, dwFlags );
 					if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 					{
 						sent = false;
@@ -1180,7 +1180,7 @@ SECURITY_STATUS SSL_WSAShutdown( SOCKET_CONTEXT *context, OVERLAPPEDEX *overlapp
 
 			overlapped->current_operation = IO_Write;
 
-			nRet = _WSASend( _ssl_s->s, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+			nRet = ContextSend( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped, dwFlags );
 			if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 			{
 				sent = false;
@@ -1282,7 +1282,7 @@ SECURITY_STATUS SSL_WSASend( SOCKET_CONTEXT *context, OVERLAPPEDEX *overlapped, 
 		send_buf->buf = ( char * )_ssl_s->sd.pbDataBuffer;
 		send_buf->len = Buffers[ 0 ].cbBuffer + Buffers[ 1 ].cbBuffer + Buffers[ 2 ].cbBuffer; // Calculate encrypted packet size
 
-		nRet = _WSASend( _ssl_s->s, send_buf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+		nRet = ContextSend( context, send_buf, ( WSAOVERLAPPED * )overlapped, dwFlags );
 		if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 		{
 			sent = false;
@@ -1333,7 +1333,7 @@ SECURITY_STATUS SSL_WSARecv( SOCKET_CONTEXT *context, OVERLAPPEDEX *overlapped, 
 				encrypted_buf.buf = ( char * )_ssl_s->pbIoBuffer + _ssl_s->cbIoBuffer;
 				encrypted_buf.len = _ssl_s->sbIoBuffer - _ssl_s->cbIoBuffer;
 
-				nRet = _WSARecv( _ssl_s->s, &encrypted_buf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+				nRet = ContextRecv( context, &encrypted_buf, ( WSAOVERLAPPED * )overlapped );
 				if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 				{
 					sent = false;

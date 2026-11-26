@@ -42,6 +42,13 @@ int WINAPIV new_session_cb( SSL *ssl, SSL_SESSION *sess );
 
 void OpenSSL_WSASend( SOCKET_CONTEXT *context, OVERLAPPEDEX *overlapped, WSABUF *send_buf, bool &sent );
 
+// Socket sends/receives with the packet reference handling built in: they call
+// AcquireContextRef before touching the socket and roll it back when the post fails. Use these
+// instead of _WSASend / _WSARecv anywhere a completion packet is being queued, so no call site
+// has to remember the reference bookkeeping.
+int ContextSend( SOCKET_CONTEXT *context, WSABUF *wsabuf, WSAOVERLAPPED *overlapped, DWORD flags );
+int ContextRecv( SOCKET_CONTEXT *context, WSABUF *wsabuf, WSAOVERLAPPED *overlapped );
+
 char OpenSSL_DecryptRecv( SOCKET_CONTEXT *context, DWORD &io_size );
 
 void OpenSSL_FreeInfo( _SSL_O **_ssl_o );

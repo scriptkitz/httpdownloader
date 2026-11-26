@@ -219,6 +219,48 @@ static bool PostContextPacket( SOCKET_CONTEXT *context, DWORD io_size, void *ove
 	return true;
 }
 
+// Socket send/receive that own the packet reference. Callers keep using the usual
+// "SOCKET_ERROR + GetLastError() != ERROR_IO_PENDING" check.
+int ContextSend( SOCKET_CONTEXT *context, WSABUF *wsabuf, WSAOVERLAPPED *overlapped, DWORD flags )
+{
+	if ( context == NULL )
+	{
+		return SOCKET_ERROR;
+	}
+
+	AcquireContextRef( context );
+
+	int ret = _WSASend( context->socket, wsabuf, 1, NULL, flags, overlapped, NULL );
+
+	if ( ret == SOCKET_ERROR && _WSAGetLastError() != ERROR_IO_PENDING )
+	{
+		DiscardContextRef( context );	// The packet was never queued.
+	}
+
+	return ret;
+}
+
+int ContextRecv( SOCKET_CONTEXT *context, WSABUF *wsabuf, WSAOVERLAPPED *overlapped )
+{
+	if ( context == NULL )
+	{
+		return SOCKET_ERROR;
+	}
+
+	DWORD flags = 0;
+
+	AcquireContextRef( context );
+
+	int ret = _WSARecv( context->socket, wsabuf, 1, NULL, &flags, overlapped, NULL );
+
+	if ( ret == SOCKET_ERROR && _WSAGetLastError() != ERROR_IO_PENDING )
+	{
+		DiscardContextRef( context );
+	}
+
+	return ret;
+}
+
 CRITICAL_SECTION active_download_list_cs;		// Guard access to the global active download list.
 CRITICAL_SECTION download_queue_cs;				// Guard access to the download queue.
 CRITICAL_SECTION file_size_prompt_list_cs;		// Guard access to the file size prompt list.
@@ -2734,7 +2776,6 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 														new_context->overlapped.current_operation = IO_Write;
 														new_context->overlapped.next_operation = IO_OpenSSLClientHandshake;
 													
-														AcquireContextRef( new_context );	// The packet will release it when the IOCP handles it.
 														OpenSSL_WSASend( new_context, &new_context->overlapped, &new_context->wsabuf, sent );
 													}
 												}
@@ -2757,8 +2798,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									new_context->wsabuf.buf = new_context->buffer;
 									new_context->wsabuf.len = new_context->buffer_size;
 
-									AcquireContextRef( new_context );	// The packet will release it when the IOCP handles it.
-									nRet = _WSARecv( new_context->socket, &new_context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )&new_context->overlapped, NULL );
+									nRet = ContextRecv( new_context, &new_context->wsabuf, ( WSAOVERLAPPED * )&new_context->overlapped );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
 										sent = false;
@@ -2791,8 +2831,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 													new_context->wsabuf.buf = new_context->buffer;
 													new_context->wsabuf.len = new_context->buffer_size;
 
-													AcquireContextRef( new_context );	// The packet will release it when the IOCP handles it.
-													nRet = _WSARecv( new_context->socket, &new_context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )&new_context->overlapped, NULL );
+													nRet = ContextRecv( new_context, &new_context->wsabuf, ( WSAOVERLAPPED * )&new_context->overlapped );
 													if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 													{
 														sent = false;
@@ -2817,8 +2856,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									new_context->wsabuf.buf = new_context->buffer;
 									new_context->wsabuf.len = new_context->buffer_size;
 
-									AcquireContextRef( new_context );	// The packet will release it when the IOCP handles it.
-									nRet = _WSARecv( new_context->socket, &new_context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )&new_context->overlapped, NULL );
+									nRet = ContextRecv( new_context, &new_context->wsabuf, ( WSAOVERLAPPED * )&new_context->overlapped );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
 										sent = false;
@@ -3105,7 +3143,6 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 													*current_operation = IO_Write;
 													*next_operation = IO_OpenSSLClientHandshake;
 												
-													AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 													OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 												}
 											}
@@ -3141,8 +3178,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 									ConstructSOCKSRequest( context, 0 );
 
-									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-									nRet = _WSASend( context->socket, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+									nRet = ContextSend( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped, dwFlags );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
 										InterlockedDecrement( &context->pending_operations );
@@ -3154,8 +3190,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								{
 									*current_operation = IO_GetContent;
 
-									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-									nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+									nRet = ContextRecv( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
 										InterlockedDecrement( &context->pending_operations );
@@ -3171,8 +3206,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								context->wsabuf.buf = context->buffer;
 								context->wsabuf.len = context->buffer_size;
 
-								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-								nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+								nRet = ContextRecv( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped );
 								if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 								{
 									InterlockedDecrement( &context->pending_operations );
@@ -3209,8 +3243,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									ConstructRequest( context, false );
 								}
 
-								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-								nRet = _WSASend( context->socket, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+								nRet = ContextSend( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped, dwFlags );
 								if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 								{
 									InterlockedDecrement( &context->pending_operations );
@@ -3287,15 +3320,13 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									{
 										*current_operation = IO_Write;
 
-										AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 										OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 									}
 									else
 									{
 										sent = true;
 
-										AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-										nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+										nRet = ContextRecv( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped );
 										if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 										{
 											sent = false;
@@ -3331,7 +3362,6 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 										*current_operation = IO_Write;
 										*next_operation = IO_GetContent;
 
-										AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 										OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 									}
 								}
@@ -3359,15 +3389,13 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									*current_operation = IO_Write;
 									*next_operation = IO_OpenSSLClientHandshake;
 
-									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 									OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 								}
 								else
 								{
 									sent = true;
 
-									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-									nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+									nRet = ContextRecv( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
 										sent = false;
@@ -3428,15 +3456,13 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								*current_operation = IO_Write;
 								*next_operation = IO_GetRequest;
 
-								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 								OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 							}
 							else
 							{
 								sent = true;
 
-								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-								nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+								nRet = ContextRecv( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped );
 								if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 								{
 									sent = false;
@@ -3465,15 +3491,13 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									*current_operation = IO_Write;
 									*next_operation = IO_OpenSSLServerHandshake;
 
-									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 									OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 								}
 								else
 								{
 									sent = true;
 
-									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-									nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+									nRet = ContextRecv( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
 										sent = false;
@@ -3568,7 +3592,6 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 							*next_operation = IO_GetContent;	// Continue where we left off before we had to renegotiate.
 
-							AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 							SSL_WSARecv( context, overlapped, sent );
 							if ( !sent )
 							{
@@ -3593,7 +3616,6 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							{
 								InterlockedIncrement( &context->pending_operations );
 
-								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 								SSL_WSARecv( context, overlapped, sent );
 								if ( !sent )
 								{
@@ -3610,7 +3632,6 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 							ConstructRequest( context, false );
 
-							AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 							SSL_WSASend( context, overlapped, &context->wsabuf, sent );
 							if ( !sent )
 							{
@@ -3704,7 +3725,6 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								context->wsabuf.buf = context->buffer;
 								context->wsabuf.len = context->buffer_size;
 
-								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 								SSL_WSARecv( context, overlapped, sent );
 							}
 						}
@@ -3749,8 +3769,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							"<!DOCTYPE html><html><head><title>301 Moved Permanently</title></head><body><h1>301 Moved Permanently</h1></body></html>", g_server_domain, g_server_port );
 
 						// We do a regular WSASend here since the connection was not encrypted.
-						AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-						nRet = _WSASend( context->socket, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+						nRet = ContextSend( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped, dwFlags );
 						if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 						{
 							*current_operation = IO_Close;
@@ -3824,8 +3843,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 						InterlockedIncrement( &context->pending_operations );
 
 						// wsabuf will be offset in ParseHTTPHeader() to handle more data.
-						AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-						nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+						nRet = ContextRecv( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped );
 						if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 						{
 							*current_operation = IO_Close;
@@ -3890,7 +3908,6 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 												*current_operation = IO_Write;
 												*next_operation = IO_OpenSSLClientHandshake;
 											
-												AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 												OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 											}
 										}
@@ -4026,8 +4043,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							context->wsabuf.len -= context->current_bytes_read;
 
 							// wsabuf will be offset in ParseHTTPHeader() to handle more data.
-							AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-							nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+							nRet = ContextRecv( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped );
 							if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 							{
 								connection_status = 1;	// Failed.
@@ -4055,8 +4071,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 									*current_operation = IO_Write;
 
-									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-									nRet = _WSASend( context->socket, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+									nRet = ContextSend( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped, dwFlags );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
 										connection_status = 1;	// Failed.
@@ -4104,8 +4119,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 							ConstructSOCKSRequest( context, 1 );
 
-							AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-							nRet = _WSASend( context->socket, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+							nRet = ContextSend( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped, dwFlags );
 							if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 							{
 								connection_status = 1;	// Failed.
@@ -4145,7 +4159,6 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 													*current_operation = IO_Write;
 													*next_operation = IO_OpenSSLClientHandshake;
 												
-													AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 													OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 												}
 											}
@@ -4173,8 +4186,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								{
 									*current_operation = IO_GetContent;
 
-									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-									nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+									nRet = ContextRecv( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
 										*current_operation = IO_Close;
@@ -4187,8 +4199,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 									ConstructRequest( context, false );
 
-									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-									nRet = _WSASend( context->socket, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+									nRet = ContextSend( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped, dwFlags );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
 										connection_status = 1;
@@ -4324,7 +4335,6 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							//context->wsabuf.buf += bytes_decrypted;
 							//context->wsabuf.len -= bytes_decrypted;
 
-							AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 							SSL_WSARecv( context, overlapped, sent );
 							if ( !sent )
 							{
@@ -4410,7 +4420,6 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							}
 							else
 							{
-								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 								SSL_WSARecv( context, overlapped, sent );
 							}
 						}
@@ -4425,8 +4434,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							}
 							else
 							{
-								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-								nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+								nRet = ContextRecv( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped );
 								if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 								{
 									sent = false;
@@ -4442,8 +4450,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							DWORD max_len = context->buffer_size - offset;
 							context->wsabuf.len = ( DWORD )ThrottleClampRecv( context, max_len );
 
-							AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-							nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+							nRet = ContextRecv( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped );
 							if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 							{
 								sent = false;
@@ -4730,7 +4737,6 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									}
 									else
 									{
-										AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 										SSL_WSARecv( context, overlapped, sent );
 										if ( !sent )
 										{
@@ -4750,8 +4756,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									}
 									else
 									{
-										AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-										nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+										nRet = ContextRecv( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped );
 										if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 										{
 											*current_operation = IO_Shutdown;
@@ -4765,8 +4770,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									// wsabuf.buf may be offset (partial data), so clamp against the remaining buffer space.
 									context->wsabuf.len = ( DWORD )ThrottleClampRecv( context, context->buffer_size - ( DWORD )( context->wsabuf.buf - context->buffer ) );
 
-									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-									nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+									nRet = ContextRecv( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
 										*current_operation = IO_Close;
@@ -4811,8 +4815,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 						context->wsabuf.len -= io_size;
 
 						// We do a regular WSASend here since that's what we last did in SSL_WSASend/OpenSSL_WSASend.
-						AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-						nRet = _WSASend( context->socket, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+						nRet = ContextSend( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped, dwFlags );
 						if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 						{
 							if ( context->ssh != NULL )
@@ -4860,15 +4863,13 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							{
 								if ( context->_ssl_s != NULL )
 								{
-									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 									SSL_WSARecv( context, overlapped, sent );
 								}
 								else// if ( context->_ssl_o != NULL )
 								{
 									sent = true;
 
-									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-									nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+									nRet = ContextRecv( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
 										sent = false;
@@ -4894,8 +4895,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								// Per-connection speed limit: cap how much we request on this receive.
 								context->wsabuf.len = ( DWORD )ThrottleClampRecv( context, context->buffer_size - ( DWORD )( context->wsabuf.buf - context->buffer ) );
 
-								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-								nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+								nRet = ContextRecv( context, &context->wsabuf, ( WSAOVERLAPPED * )overlapped );
 								if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 								{
 									*current_operation = IO_Close;
@@ -4970,8 +4970,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 						InterlockedIncrement( &context->pending_operations );
 
 						// We do a regular WSASend here since that's what we last did in SSL_WSASend.
-						AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
-						nRet = _WSASend( context->socket, &context->keep_alive_wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+						nRet = ContextSend( context, &context->keep_alive_wsabuf, ( WSAOVERLAPPED * )overlapped, dwFlags );
 						if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 						{
 							*current_operation = IO_Close;
@@ -5031,7 +5030,6 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									*current_operation = IO_Write;
 									*next_operation = IO_Close;	// _SSL_shutdown() must not be called again if _SSL_get_error() is SSL_ERROR_SYSCALL or SSL_ERROR_SSL.
 
-									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 									OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 								}
 							}

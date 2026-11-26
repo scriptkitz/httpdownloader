@@ -184,7 +184,9 @@ void OpenSSL_WSASend( SOCKET_CONTEXT *context, OVERLAPPEDEX *overlapped, WSABUF 
 
 			sent = true;
 
-			nRet = _WSASend( context->socket, send_buf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
+			// ContextSend takes the packet reference and rolls it back if the post fails. The
+			// buffer it sends is context->wsabuf, which is what every caller passes in here.
+			nRet = ContextSend( context, send_buf, ( WSAOVERLAPPED * )overlapped, dwFlags );
 			if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 			{
 				sent = false;
