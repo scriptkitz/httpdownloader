@@ -130,6 +130,13 @@ HANDLE g_timeout_semaphore = NULL;
 HANDLE g_update_semaphore = NULL;
 
 CRITICAL_SECTION context_list_cs;				// Guard access to the global context list.
+
+// Delayed context reclamation (see the block above CleanupConnection). Declared here because the
+// timeout thread reaps retired contexts long before that code is defined.
+static CRITICAL_SECTION g_retired_cs;
+static void ReapRetiredContexts( void );
+static void FreeAllRetiredContexts( void );
+static void RetireContext( SOCKET_CONTEXT *context );
 CRITICAL_SECTION active_download_list_cs;		// Guard access to the global active download list.
 CRITICAL_SECTION download_queue_cs;				// Guard access to the download queue.
 CRITICAL_SECTION file_size_prompt_list_cs;		// Guard access to the file size prompt list.
@@ -684,6 +691,10 @@ DWORD WINAPI Timeout( LPVOID /*WorkThreadContext*/ )
 		// This will allow the timer to go through at least one loop after it's been disabled (g_timers_running == false).
 		run_timer = g_timers_running;
 
+		// Free contexts that were torn down a few seconds ago. The delay is what keeps a late
+		// completion packet from touching freed memory (see RetireContext).
+		ReapRetiredContexts();
+
 		if ( TryEnterCriticalSection( &context_list_cs ) == TRUE )
 		{
 			DoublyLinkedList *context_node = g_context_list;
@@ -840,7 +851,10 @@ DWORD WINAPI Timeout( LPVOID /*WorkThreadContext*/ )
 			// repeated pause/stop/start cycles trigger. Re-post a close to get it cleaned up.
 			if ( TryEnterCriticalSection( &context->context_cs ) == TRUE )
 			{
-				if ( context->cleanup != 0 && context->pending_operations == 0 )
+				// cleanup == 1 means "marked for cleanup, waiting for the in-flight operations".
+				// cleanup == 2 already has a forced close in flight, so posting another one here
+				// made two completions race into CleanupConnection (the duplicate-teardown crash).
+				if ( context->cleanup == 1 && context->pending_operations == 0 && context->cleanup_done == 0 )
 				{
 					++context->cleanup_ticks;
 
@@ -1185,6 +1199,8 @@ THREAD_RETURN IOCPDownloader( void * /*pArguments*/ )
 
 	g_timeout_semaphore = CreateSemaphore( NULL, 0, 1, NULL );
 
+	InitializeCriticalSection( &g_retired_cs );
+
 	HANDLE timeout_handle = _CreateThread( NULL, 0, Timeout, NULL, 0, NULL );
 	if ( timeout_handle != NULL )
 	{
@@ -1278,6 +1294,10 @@ HARD_CLEANUP:
 	{
 		ReleaseSemaphore( g_downloader_ready_semaphore, 1, NULL );
 	}
+
+	// Every IOCP thread has stopped by now, so no late packet can arrive: release the contexts
+	// that were waiting out their grace period.
+	FreeAllRetiredContexts();
 
 #ifdef ENABLE_LOGGING
 	WriteLog( LOG_INFO_MISC, "Exiting main IOCP thread" );
@@ -2265,6 +2285,14 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 		if ( overlapped != NULL && overlapped->context != NULL )
 		{
 			context = overlapped->context;
+
+			// Late packet for a context that has already been torn down. Its memory is still
+			// valid only because of the grace period (RetireContext), so nothing may touch it -
+			// in particular do not enter its critical section, it has been deleted.
+			if ( context->retired != 0 )
+			{
+				continue;
+			}
 
 			current_operation = &overlapped->current_operation;
 			next_operation = &overlapped->next_operation;
@@ -9072,6 +9100,7 @@ bool RetryTimedOut( SOCKET_CONTEXT *context )
 		context->status = STATUS_CONNECTING;
 
 		context->cleanup = 0;	// Reset. Can only be set in CleanupConnection and if there's no more pending operations.
+		context->cleanup_done = 0;	// Reused context: allow the next teardown to run.
 
 		// Connect to the remote server.
 		if ( !CreateConnection( context, context->request_info.host, context->request_info.port ) )
@@ -10085,6 +10114,93 @@ bool SetCleanupState( SOCKET_CONTEXT *context )
 	return skip_cleanup;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Delayed context reclamation
+//
+// A context is torn down as soon as pending_operations reaches zero, but a completion packet
+// posted earlier can still be queued in the IOCP pointing at it. Freeing the memory right away
+// turned that packet into a use-after-free: the IOCP thread dereferenced the stale pointer and
+// entered the already deleted critical section - 0xc0000005 writing 0x24 inside
+// ntdll!RtlpWaitOnCriticalSection, which is exactly the stack from the 2026-11-25 dump.
+//
+// So the context is *retired* instead: memory and context_cs stay valid for a grace period, the
+// retired flag makes the IOCP loop ignore any late packet, and the timeout thread frees it later.
+// ---------------------------------------------------------------------------------------------
+#define RETIRED_CONTEXT_SLOTS		512
+#define RETIRED_CONTEXT_GRACE_MS	5000
+
+static SOCKET_CONTEXT *g_retired_contexts[ RETIRED_CONTEXT_SLOTS ];
+static ULONGLONG g_retired_context_times[ RETIRED_CONTEXT_SLOTS ];
+static volatile LONG g_retired_index = 0;
+
+static void FreeRetiredContext( SOCKET_CONTEXT *context )
+{
+	if ( context == NULL )
+	{
+		return;
+	}
+
+	DeleteCriticalSection( &context->context_cs );
+
+	GlobalFree( context );
+}
+
+static void RetireContext( SOCKET_CONTEXT *context )
+{
+	if ( context == NULL )
+	{
+		return;
+	}
+
+	// Set before publishing the pointer: the IOCP loop tests this flag for packets that were
+	// already queued.
+	InterlockedExchange( &context->retired, 1 );
+
+	EnterCriticalSection( &g_retired_cs );
+
+	LONG slot = InterlockedIncrement( &g_retired_index ) % RETIRED_CONTEXT_SLOTS;
+
+	// A full lap happened: whatever still sits in this slot is far past the grace period.
+	FreeRetiredContext( g_retired_contexts[ slot ] );
+
+	g_retired_contexts[ slot ] = context;
+	g_retired_context_times[ slot ] = GetTickCount64();
+
+	LeaveCriticalSection( &g_retired_cs );
+}
+
+static void ReapRetiredContexts( void )
+{
+	ULONGLONG now = GetTickCount64();
+
+	EnterCriticalSection( &g_retired_cs );
+
+	for ( int i = 0; i < RETIRED_CONTEXT_SLOTS; ++i )
+	{
+		if ( g_retired_contexts[ i ] != NULL &&
+			 now - g_retired_context_times[ i ] >= RETIRED_CONTEXT_GRACE_MS )
+		{
+			FreeRetiredContext( g_retired_contexts[ i ] );
+			g_retired_contexts[ i ] = NULL;
+		}
+	}
+
+	LeaveCriticalSection( &g_retired_cs );
+}
+
+static void FreeAllRetiredContexts( void )
+{
+	EnterCriticalSection( &g_retired_cs );
+
+	for ( int i = 0; i < RETIRED_CONTEXT_SLOTS; ++i )
+	{
+		FreeRetiredContext( g_retired_contexts[ i ] );
+		g_retired_contexts[ i ] = NULL;
+	}
+
+	LeaveCriticalSection( &g_retired_cs );
+}
+
 void CleanupConnection( SOCKET_CONTEXT *context )
 {
 	if ( context != NULL )
@@ -10092,6 +10208,22 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 		// Returns true if there's pending operations that need to complete first.
 		if ( SetCleanupState( context ) )
 		{
+			return;
+		}
+
+		// Only one path may tear the context down. A forced close (cleanup = 2) can race with a
+		// real IO completion: both end up here, both see pending_operations == 0 and the second
+		// one frees objects the first already released. That is the 0xc0000005 in ntdll's heap
+		// code seen right after "re-posted close for stuck context".
+		//
+		// Placed after SetCleanupState() on purpose: that call decides whether there is really
+		// nothing left to wait for, and it must run for every caller. Only the actual teardown
+		// is guarded.
+		if ( InterlockedCompareExchange( &context->cleanup_done, 1, 0 ) != 0 )
+		{
+#ifdef ENABLE_LOGGING
+			WriteLog( LOG_WARNING, "[CLEANUP] duplicate cleanup ignored ctx=%p", (void *)context );
+#endif
 			return;
 		}
 
@@ -11191,12 +11323,13 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 
 			// context->download_info is freed in WM_DESTROY.
 
-			DeleteCriticalSection( &context->context_cs );
-
 			if ( context->buffer != NULL ){ GlobalFree( context->buffer ); }
 			if ( context->keep_alive_buffer != NULL ){ GlobalFree( context->keep_alive_buffer ); }
 
-			GlobalFree( context );
+			// Do NOT free the context here: a completion packet posted earlier may still be in
+			// the IOCP queue with this pointer. It is released by the timeout thread once the
+			// grace period has passed (see RetireContext).
+			RetireContext( context );
 		}
 
 		LeaveCriticalSection( &cleanup_cs );

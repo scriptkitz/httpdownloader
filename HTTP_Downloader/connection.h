@@ -405,6 +405,19 @@ struct SOCKET_CONTEXT
 
 	unsigned char		cleanup;			// In cleanup function, or in worker thread doing/calling cleanup.
 
+	// Set to 1 (via InterlockedCompareExchange) by whoever actually starts tearing the context
+	// down. Every other path that reaches CleanupConnection afterwards returns immediately.
+	// Without this a forced close that races with a real IO completion runs the teardown twice
+	// and frees the same objects again - ntdll reported it as 0xc0000005 in RtlpHeap code.
+	volatile LONG		cleanup_done;
+
+	// Set once the context has been torn down. The memory (and therefore context_cs) stays
+	// allocated for a few seconds afterwards, because a completion packet may still be sitting
+	// in the IOCP queue pointing at it: EnterCriticalSection() on an already deleted critical
+	// section is exactly the 0xc0000005 at ntdll!RtlpWaitOnCriticalSection seen in the dump.
+	// The IOCP loop skips packets whose context is retired.
+	volatile LONG		retired;
+
 	unsigned char		got_filename;		// For Content-Disposition header fields. 0 = none/not found, 1 = renamed (doesn't exist), 2 = renamed (exists)
 	unsigned char		got_last_modified;	// For Last-Modified header fields. 0 = none/not found, 1 = found, 2 = prompt
 
