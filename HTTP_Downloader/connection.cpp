@@ -137,6 +137,88 @@ static CRITICAL_SECTION g_retired_cs;
 static void ReapRetiredContexts( void );
 static void FreeAllRetiredContexts( void );
 static void RetireContext( SOCKET_CONTEXT *context );
+
+// ---------------------------------------------------------------------------------------------
+// Context references
+//
+// Every completion packet queued against a context holds one reference: taken when it is posted,
+// dropped when the IOCP loop has finished handling it. The memory is released only once the count
+// is zero AND the teardown already ran, so "a queued packet points at freed memory" cannot happen
+// - that was the 0xc0000005 inside ntdll's critical section code.
+//
+// pending_operations is the old, incomplete accounting and is kept for the existing logic; refs
+// is the one that actually guards the lifetime.
+// ---------------------------------------------------------------------------------------------
+static void AcquireContextRef( SOCKET_CONTEXT *context )
+{
+	if ( context != NULL )
+	{
+		InterlockedIncrement( &context->refs );
+	}
+}
+
+// The post failed, so no completion will ever come back for it. Never frees: a failed post can
+// only happen while the download is still running and the teardown path owns the release.
+static void DiscardContextRef( SOCKET_CONTEXT *context )
+{
+	if ( context != NULL )
+	{
+		InterlockedDecrement( &context->refs );
+	}
+}
+
+static void ReleaseContextRef( SOCKET_CONTEXT *context )
+{
+	if ( context == NULL )
+	{
+		return;
+	}
+
+	if ( InterlockedDecrement( &context->refs ) == 0 &&
+		 InterlockedCompareExchange( &context->teardown_done, 1, 1 ) == 1 )
+	{
+		DeleteCriticalSection( &context->context_cs );
+
+		GlobalFree( context );
+	}
+}
+
+// Drops the reference held by the completion packet being processed. The IOCP loop creates one
+// right after resolving the context, so every exit path (including 'continue') releases exactly
+// once - no per-branch bookkeeping to forget.
+struct ContextPacketScope
+{
+	SOCKET_CONTEXT *context;
+
+	explicit ContextPacketScope( SOCKET_CONTEXT *c ) : context( c ) {}
+	~ContextPacketScope() { ReleaseContextRef( context ); }
+
+private:
+	ContextPacketScope( const ContextPacketScope & );
+	ContextPacketScope &operator=( const ContextPacketScope & );
+};
+
+// Posts a completion packet and takes a reference for it. Returns false if it could not be queued
+// (the reference is rolled back).
+static bool PostContextPacket( SOCKET_CONTEXT *context, DWORD io_size, void *overlapped )
+{
+	if ( context == NULL || overlapped == NULL )
+	{
+		return false;
+	}
+
+	AcquireContextRef( context );
+
+	if ( PostQueuedCompletionStatus( g_hIOCP, io_size, ( ULONG_PTR )context, ( OVERLAPPED * )overlapped ) == FALSE )
+	{
+		DiscardContextRef( context );
+
+		return false;
+	}
+
+	return true;
+}
+
 CRITICAL_SECTION active_download_list_cs;		// Guard access to the global active download list.
 CRITICAL_SECTION download_queue_cs;				// Guard access to the download queue.
 CRITICAL_SECTION file_size_prompt_list_cs;		// Guard access to the file size prompt list.
@@ -693,7 +775,6 @@ DWORD WINAPI Timeout( LPVOID /*WorkThreadContext*/ )
 
 		// Free contexts that were torn down a few seconds ago. The delay is what keeps a late
 		// completion packet from touching freed memory (see RetireContext).
-		ReapRetiredContexts();
 
 		if ( TryEnterCriticalSection( &context_list_cs ) == TRUE )
 		{
@@ -781,9 +862,8 @@ DWORD WINAPI Timeout( LPVOID /*WorkThreadContext*/ )
 									{
 										context->cleanup = 2;	// Force the cleanup.
 
-										InterlockedIncrement( &context->pending_operations );
 										context->overlapped_close.current_operation = ( context->_ssl_s != NULL || context->_ssl_o != NULL ? IO_Shutdown : IO_Close );
-										PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped_close );
+										PostContextPacket( context, (DWORD)(0), &context->overlapped_close );
 									}
 								}
 							}
@@ -862,9 +942,8 @@ DWORD WINAPI Timeout( LPVOID /*WorkThreadContext*/ )
 					{
 						context->cleanup_ticks = 0;
 
-						InterlockedIncrement( &context->pending_operations );
 						context->overlapped_close.current_operation = ( context->_ssl_s != NULL || context->_ssl_o != NULL ? IO_Shutdown : IO_Close );
-						PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped_close );
+						PostContextPacket( context, (DWORD)(0), &context->overlapped_close );
 
 #ifdef ENABLE_LOGGING
 						WriteLog( LOG_WARNING,
@@ -901,11 +980,10 @@ DWORD WINAPI Timeout( LPVOID /*WorkThreadContext*/ )
 			 context->download_info->active_parts < GetDynamicPartsTarget( context->download_info ) &&
 			 InterlockedCompareExchange( &context->split_requested, 1, 0 ) == 0 )
 		{
-			InterlockedIncrement( &context->pending_operations );
 
 			context->overlapped_reallocate.current_operation = IO_Reallocate;
 
-			PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped_reallocate );
+			PostContextPacket( context, (DWORD)(0), &context->overlapped_reallocate );
 		}
 
 			context_node = context_node->next;
@@ -1297,7 +1375,6 @@ HARD_CLEANUP:
 
 	// Every IOCP thread has stopped by now, so no late packet can arrive: release the contexts
 	// that were waiting out their grace period.
-	FreeAllRetiredContexts();
 
 #ifdef ENABLE_LOGGING
 	WriteLog( LOG_INFO_MISC, "Exiting main IOCP thread" );
@@ -1794,9 +1871,8 @@ THREAD_RETURN PromptRenameFile( void *pArguments )
 						{
 							context->cleanup = 1;	// Auto cleanup.
 
-							InterlockedIncrement( &context->pending_operations );
 							context->overlapped_close.current_operation = ( context->_ssl_s != NULL || context->_ssl_o != NULL ? IO_Shutdown : IO_Close );
-							PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped_close );
+							PostContextPacket( context, (DWORD)(0), &context->overlapped_close );
 						}
 					}
 					else	// Continue where we left off when getting the content.
@@ -1809,9 +1885,8 @@ THREAD_RETURN PromptRenameFile( void *pArguments )
 
 						context->status &= ~STATUS_INPUT_REQUIRED;
 
-						InterlockedIncrement( &context->pending_operations );
 						context->overlapped.current_operation = IO_ResumeGetContent;
-						PostQueuedCompletionStatus( g_hIOCP, context->current_bytes_read, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped );
+						PostContextPacket( context, (DWORD)(context->current_bytes_read), &context->overlapped );
 					}
 				}
 				else if ( choice == CMBIDFAIL || choice == CMBIDSKIP || choice == CMBIDSKIPALL ) // Skip the rename or overwrite if the return value fails, or the user selected skip.
@@ -1830,9 +1905,8 @@ THREAD_RETURN PromptRenameFile( void *pArguments )
 					{
 						context->cleanup = 1;	// Auto cleanup.
 
-						InterlockedIncrement( &context->pending_operations );
 						context->overlapped_close.current_operation = ( context->_ssl_s != NULL || context->_ssl_o != NULL ? IO_Shutdown : IO_Close );
-						PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped_close );
+						PostContextPacket( context, (DWORD)(0), &context->overlapped_close );
 					}
 				}
 				else	// Continue where we left off when getting the content.
@@ -1845,9 +1919,8 @@ THREAD_RETURN PromptRenameFile( void *pArguments )
 
 					context->status &= ~STATUS_INPUT_REQUIRED;
 
-					InterlockedIncrement( &context->pending_operations );
 					context->overlapped.current_operation = IO_ResumeGetContent;
-					PostQueuedCompletionStatus( g_hIOCP, context->current_bytes_read, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped );
+					PostContextPacket( context, (DWORD)(context->current_bytes_read), &context->overlapped );
 				}
 			}
 			else	// No DOWNLOAD_INFO? Then skip.
@@ -1860,9 +1933,8 @@ THREAD_RETURN PromptRenameFile( void *pArguments )
 				{
 					context->cleanup = 1;	// Auto cleanup.
 
-					InterlockedIncrement( &context->pending_operations );
 					context->overlapped_close.current_operation = ( context->_ssl_s != NULL || context->_ssl_o != NULL ? IO_Shutdown : IO_Close );
-					PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped_close );
+					PostContextPacket( context, (DWORD)(0), &context->overlapped_close );
 				}
 			}
 
@@ -1947,7 +2019,6 @@ THREAD_RETURN PromptFileSize( void * /*pArguments*/ )
 
 					if ( context->cleanup == 0 )
 					{
-						InterlockedIncrement( &context->pending_operations );
 
 						if ( context->ssh != NULL )
 						{
@@ -1957,13 +2028,13 @@ THREAD_RETURN PromptFileSize( void * /*pArguments*/ )
 							context->overlapped_close.current_operation = IO_SFTPCleanup;
 
 							context->overlapped.current_operation = IO_SFTPReadContent;//IO_SFTPResumeReadContent;
-							PostQueuedCompletionStatus( g_hIOCP, 0/*context->current_bytes_read*/, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped );
+							PostContextPacket( context, (DWORD)(0/*context->current_bytes_read*/), &context->overlapped );
 						}
 						else
 						{
 							context->cleanup = 1;	// Auto cleanup.
 							context->overlapped_close.current_operation = ( context->_ssl_s != NULL || context->_ssl_o != NULL ? IO_Shutdown : IO_Close );
-							PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped_close );
+							PostContextPacket( context, (DWORD)(0), &context->overlapped_close );
 						}
 					}
 				}
@@ -1975,9 +2046,8 @@ THREAD_RETURN PromptFileSize( void * /*pArguments*/ )
 
 					context->status &= ~STATUS_INPUT_REQUIRED;
 
-					InterlockedIncrement( &context->pending_operations );
 					context->overlapped.current_operation = ( context->ssh != NULL ? IO_SFTPResumeReadContent : IO_ResumeGetContent );
-					PostQueuedCompletionStatus( g_hIOCP, context->current_bytes_read, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped );
+					PostContextPacket( context, (DWORD)(context->current_bytes_read), &context->overlapped );
 				}
 			}
 			else	// No DOWNLOAD_INFO? Then skip.
@@ -1988,7 +2058,6 @@ THREAD_RETURN PromptFileSize( void * /*pArguments*/ )
 
 				if ( context->cleanup == 0 )
 				{
-					InterlockedIncrement( &context->pending_operations );
 
 					if ( context->ssh != NULL )
 					{
@@ -1998,13 +2067,13 @@ THREAD_RETURN PromptFileSize( void * /*pArguments*/ )
 						context->overlapped_close.current_operation = IO_SFTPCleanup;
 
 						context->overlapped.current_operation = IO_SFTPReadContent;//IO_SFTPResumeReadContent;
-						PostQueuedCompletionStatus( g_hIOCP, 0/*context->current_bytes_read*/, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped );
+						PostContextPacket( context, (DWORD)(0/*context->current_bytes_read*/), &context->overlapped );
 					}
 					else
 					{
 						context->cleanup = 1;	// Auto cleanup.
 						context->overlapped_close.current_operation = ( context->_ssl_s != NULL || context->_ssl_o != NULL ? IO_Shutdown : IO_Close );
-						PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped_close );
+						PostContextPacket( context, (DWORD)(0), &context->overlapped_close );
 					}
 				}
 			}
@@ -2122,7 +2191,6 @@ MOD_RESTART:
 
 						if ( context->cleanup == 0 )
 						{
-							InterlockedIncrement( &context->pending_operations );
 
 							if ( context->ssh != NULL )
 							{
@@ -2132,13 +2200,13 @@ MOD_RESTART:
 								context->overlapped_close.current_operation = IO_SFTPCleanup;
 
 								context->overlapped.current_operation = IO_SFTPReadContent;//IO_SFTPResumeReadContent;
-								PostQueuedCompletionStatus( g_hIOCP, 0/*context->current_bytes_read*/, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped );
+								PostContextPacket( context, (DWORD)(0/*context->current_bytes_read*/), &context->overlapped );
 							}
 							else
 							{
 								context->cleanup = 1;	// Auto cleanup.
 								context->overlapped_close.current_operation = ( context->_ssl_s != NULL || context->_ssl_o != NULL ? IO_Shutdown : IO_Close );
-								PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped_close );
+								PostContextPacket( context, (DWORD)(0), &context->overlapped_close );
 							}
 						}
 					}
@@ -2159,7 +2227,6 @@ MOD_SKIP:
 
 						if ( context->cleanup == 0 )
 						{
-							InterlockedIncrement( &context->pending_operations );
 
 							if ( context->ssh != NULL )
 							{
@@ -2169,13 +2236,13 @@ MOD_SKIP:
 								context->overlapped_close.current_operation = IO_SFTPCleanup;
 
 								context->overlapped.current_operation = IO_SFTPReadContent/*IO_SFTPResumeReadContent*/;
-								PostQueuedCompletionStatus( g_hIOCP, 0/*context->current_bytes_read*/, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped );
+								PostContextPacket( context, (DWORD)(0/*context->current_bytes_read*/), &context->overlapped );
 							}
 							else
 							{
 								context->cleanup = 1;	// Auto cleanup.
 								context->overlapped_close.current_operation = ( context->_ssl_s != NULL || context->_ssl_o != NULL ? IO_Shutdown : IO_Close );
-								PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped_close );
+								PostContextPacket( context, (DWORD)(0), &context->overlapped_close );
 							}
 						}
 					}
@@ -2200,9 +2267,8 @@ MOD_CONTINUE:
 
 						context->status &= ~STATUS_INPUT_REQUIRED;
 
-						InterlockedIncrement( &context->pending_operations );
 						context->overlapped.current_operation = ( context->ssh != NULL ? IO_SFTPResumeReadContent : IO_ResumeGetContent );
-						PostQueuedCompletionStatus( g_hIOCP, context->current_bytes_read, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped );
+						PostContextPacket( context, (DWORD)(context->current_bytes_read), &context->overlapped );
 					}
 				}
 			}
@@ -2214,7 +2280,6 @@ MOD_CONTINUE:
 
 				if ( context->cleanup == 0 )
 				{
-					InterlockedIncrement( &context->pending_operations );
 
 					if ( context->ssh != NULL )
 					{
@@ -2224,13 +2289,13 @@ MOD_CONTINUE:
 						context->overlapped_close.current_operation = IO_SFTPCleanup;
 
 						context->overlapped.current_operation = IO_SFTPReadContent;//IO_SFTPResumeReadContent;
-						PostQueuedCompletionStatus( g_hIOCP, 0/*context->current_bytes_read*/, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped );
+						PostContextPacket( context, (DWORD)(0/*context->current_bytes_read*/), &context->overlapped );
 					}
 					else
 					{
 						context->cleanup = 1;	// Auto cleanup.
 						context->overlapped_close.current_operation = ( context->_ssl_s != NULL || context->_ssl_o != NULL ? IO_Shutdown : IO_Close );
-						PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped_close );
+						PostContextPacket( context, (DWORD)(0), &context->overlapped_close );
 					}
 				}
 			}
@@ -2286,10 +2351,15 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 		{
 			context = overlapped->context;
 
-			// Late packet for a context that has already been torn down. Its memory is still
-			// valid only because of the grace period (RetireContext), so nothing may touch it -
-			// in particular do not enter its critical section, it has been deleted.
-			if ( context->retired != 0 )
+			// Every queued packet holds a reference taken when it was posted. Dropping it at the
+			// end of this iteration (any exit path, including 'continue') is what allows the
+			// context to be freed - and guarantees it is not freed while packets are still
+			// queued, which was the use-after-free behind the ntdll critical section crash.
+			ContextPacketScope packet_reference( context );
+
+			// Teardown already ran for this context (a packet that was queued before it was
+			// removed). Nothing may touch it: its critical section is gone.
+			if ( context->teardown_done != 0 )
 			{
 				continue;
 			}
@@ -2560,9 +2630,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 						}
 						else
 						{
-							InterlockedIncrement( &ftp_control_context->pending_operations );
 							ftp_control_context->overlapped.current_operation = IO_Close;
-							PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )ftp_control_context, ( WSAOVERLAPPED * )&ftp_control_context->overlapped );
+							PostContextPacket( ftp_control_context, (DWORD)(0), &ftp_control_context->overlapped );
 						}
 
 						LeaveCriticalSection( &ftp_control_context->context_cs );
@@ -2665,6 +2734,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 														new_context->overlapped.current_operation = IO_Write;
 														new_context->overlapped.next_operation = IO_OpenSSLClientHandshake;
 													
+														AcquireContextRef( new_context );	// The packet will release it when the IOCP handles it.
 														OpenSSL_WSASend( new_context, &new_context->overlapped, &new_context->wsabuf, sent );
 													}
 												}
@@ -2687,6 +2757,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									new_context->wsabuf.buf = new_context->buffer;
 									new_context->wsabuf.len = new_context->buffer_size;
 
+									AcquireContextRef( new_context );	// The packet will release it when the IOCP handles it.
 									nRet = _WSARecv( new_context->socket, &new_context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )&new_context->overlapped, NULL );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
@@ -2720,6 +2791,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 													new_context->wsabuf.buf = new_context->buffer;
 													new_context->wsabuf.len = new_context->buffer_size;
 
+													AcquireContextRef( new_context );	// The packet will release it when the IOCP handles it.
 													nRet = _WSARecv( new_context->socket, &new_context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )&new_context->overlapped, NULL );
 													if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 													{
@@ -2745,6 +2817,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									new_context->wsabuf.buf = new_context->buffer;
 									new_context->wsabuf.len = new_context->buffer_size;
 
+									AcquireContextRef( new_context );	// The packet will release it when the IOCP handles it.
 									nRet = _WSARecv( new_context->socket, &new_context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )&new_context->overlapped, NULL );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
@@ -2756,7 +2829,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							if ( !sent )
 							{
 								new_context->overlapped.current_operation = IO_Close;
-								PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )new_context, ( WSAOVERLAPPED * )&new_context->overlapped );
+								PostContextPacket( new_context, (DWORD)(0), &new_context->overlapped );
 							}
 						}
 						else if ( new_context->cleanup == 2 )	// If we've forced the cleanup, then allow it to continue its steps.
@@ -2765,9 +2838,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 						}
 						else	// We've already shutdown and/or closed the connection.
 						{
-							InterlockedIncrement( &new_context->pending_operations );
 							new_context->overlapped.current_operation = IO_Close;	// Handshake hasn't occurred so we need to close it.
-							PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )new_context, ( WSAOVERLAPPED * )&new_context->overlapped );
+							PostContextPacket( new_context, (DWORD)(0), &new_context->overlapped );
 						}
 
 						LeaveCriticalSection( &new_context->context_cs );
@@ -2779,9 +2851,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				}
 				else	// We've already shutdown and/or closed the connection.
 				{
-					InterlockedIncrement( &context->pending_operations );
 					*current_operation = IO_Close;
-					PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+					PostContextPacket( context, (DWORD)(0), overlapped );
 				}
 
 				LeaveCriticalSection( &context->context_cs );
@@ -3034,6 +3105,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 													*current_operation = IO_Write;
 													*next_operation = IO_OpenSSLClientHandshake;
 												
+													AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 													OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 												}
 											}
@@ -3069,6 +3141,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 									ConstructSOCKSRequest( context, 0 );
 
+									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 									nRet = _WSASend( context->socket, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
@@ -3081,6 +3154,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								{
 									*current_operation = IO_GetContent;
 
+									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 									nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
@@ -3097,6 +3171,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								context->wsabuf.buf = context->buffer;
 								context->wsabuf.len = context->buffer_size;
 
+								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 								nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 								if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 								{
@@ -3134,6 +3209,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									ConstructRequest( context, false );
 								}
 
+								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 								nRet = _WSASend( context->socket, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 								if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 								{
@@ -3160,9 +3236,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 				if ( connection_failed )
 				{
-					InterlockedIncrement( &context->pending_operations );
 					*current_operation = IO_Close;	// Handshake hasn't occurred so we need to close it.
-					PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+					PostContextPacket( context, (DWORD)(0), overlapped );
 				}
 
 				LeaveCriticalSection( &context->context_cs );
@@ -3193,9 +3268,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								{
 									if ( MakeFTPResponse( context ) == FTP_CONTENT_STATUS_FAILED )
 									{
-										InterlockedIncrement( &context->pending_operations );
 										*current_operation = IO_Shutdown;
-										PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+										PostContextPacket( context, (DWORD)(0), overlapped );
 									}
 								}
 								else
@@ -3213,12 +3287,14 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									{
 										*current_operation = IO_Write;
 
+										AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 										OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 									}
 									else
 									{
 										sent = true;
 
+										AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 										nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 										if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 										{
@@ -3229,7 +3305,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									if ( !sent )
 									{
 										*current_operation = IO_Shutdown;
-										PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+										PostContextPacket( context, (DWORD)(0), overlapped );
 									}
 								}
 							}
@@ -3255,6 +3331,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 										*current_operation = IO_Write;
 										*next_operation = IO_GetContent;
 
+										AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 										OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 									}
 								}
@@ -3262,7 +3339,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								if ( !sent )
 								{
 									*current_operation = IO_Shutdown;
-									PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+									PostContextPacket( context, (DWORD)(0), overlapped );
 								}
 							}
 						}
@@ -3282,12 +3359,14 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									*current_operation = IO_Write;
 									*next_operation = IO_OpenSSLClientHandshake;
 
+									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 									OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 								}
 								else
 								{
 									sent = true;
 
+									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 									nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
@@ -3299,14 +3378,14 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							if ( !sent )
 							{
 								*current_operation = IO_Close;	// Handshake hasn't occurred so we need to close it.
-								PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+								PostContextPacket( context, (DWORD)(0), overlapped );
 							}
 						}
 					}
 					else
 					{
 						*current_operation = IO_Close;	// Handshake hasn't occurred so we need to close it.
-						PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+						PostContextPacket( context, (DWORD)(0), overlapped );
 					}
 				}
 				else if ( context->cleanup == 2 )	// If we've forced the cleanup, then allow it to continue its steps.
@@ -3315,9 +3394,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				}
 				else	// We've already shutdown and/or closed the connection.
 				{
-					InterlockedIncrement( &context->pending_operations );
 					*current_operation = IO_Close;
-					PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+					PostContextPacket( context, (DWORD)(0), overlapped );
 				}
 
 				LeaveCriticalSection( &context->context_cs );
@@ -3350,12 +3428,14 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								*current_operation = IO_Write;
 								*next_operation = IO_GetRequest;
 
+								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 								OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 							}
 							else
 							{
 								sent = true;
 
+								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 								nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 								if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 								{
@@ -3366,7 +3446,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							if ( !sent )
 							{
 								*current_operation = IO_Shutdown;
-								PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+								PostContextPacket( context, (DWORD)(0), overlapped );
 							}
 						}
 						else
@@ -3385,12 +3465,14 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									*current_operation = IO_Write;
 									*next_operation = IO_OpenSSLServerHandshake;
 
+									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 									OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 								}
 								else
 								{
 									sent = true;
 
+									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 									nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
@@ -3402,14 +3484,14 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							if ( !sent )
 							{
 								*current_operation = IO_Close;	// Handshake hasn't occurred so we need to close it.
-								PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+								PostContextPacket( context, (DWORD)(0), overlapped );
 							}
 						}
 					}
 					else
 					{
 						*current_operation = IO_Close;	// Handshake hasn't occurred so we need to close it.
-						PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+						PostContextPacket( context, (DWORD)(0), overlapped );
 					}
 				}
 				else if ( context->cleanup == 2 )	// If we've forced the cleanup, then allow it to continue its steps.
@@ -3418,9 +3500,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				}
 				else	// We've already shutdown and/or closed the connection.
 				{
-					InterlockedIncrement( &context->pending_operations );
 					*current_operation = IO_Close;
-					PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+					PostContextPacket( context, (DWORD)(0), overlapped );
 				}
 
 				LeaveCriticalSection( &context->context_cs );
@@ -3487,11 +3568,12 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 							*next_operation = IO_GetContent;	// Continue where we left off before we had to renegotiate.
 
+							AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 							SSL_WSARecv( context, overlapped, sent );
 							if ( !sent )
 							{
 								*current_operation = IO_Shutdown;
-								PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+								PostContextPacket( context, (DWORD)(0), overlapped );
 							}
 						}
 						else if ( context->request_info.protocol == PROTOCOL_FTPS ||
@@ -3503,20 +3585,20 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							{
 								if ( MakeFTPResponse( context ) == FTP_CONTENT_STATUS_FAILED )
 								{
-									InterlockedIncrement( &context->pending_operations );
 									*current_operation = IO_Shutdown;
-									PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+									PostContextPacket( context, (DWORD)(0), overlapped );
 								}
 							}
 							else
 							{
 								InterlockedIncrement( &context->pending_operations );
 
+								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 								SSL_WSARecv( context, overlapped, sent );
 								if ( !sent )
 								{
 									*current_operation = IO_Shutdown;
-									PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+									PostContextPacket( context, (DWORD)(0), overlapped );
 								}
 							}
 						}
@@ -3528,11 +3610,12 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 							ConstructRequest( context, false );
 
+							AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 							SSL_WSASend( context, overlapped, &context->wsabuf, sent );
 							if ( !sent )
 							{
 								*current_operation = IO_Shutdown;
-								PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+								PostContextPacket( context, (DWORD)(0), overlapped );
 							}
 						}
 					}
@@ -3545,9 +3628,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							( context->request_info.host != NULL ? context->request_info.host : "" ) );
 #endif
 
-						InterlockedIncrement( &context->pending_operations );
 						*current_operation = IO_Close;
-						PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+						PostContextPacket( context, (DWORD)(0), overlapped );
 					}
 				}
 				else if ( context->cleanup == 2 )	// If we've forced the cleanup, then allow it to continue its steps.
@@ -3556,9 +3638,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				}
 				else	// We've already shutdown and/or closed the connection.
 				{
-					InterlockedIncrement( &context->pending_operations );
 					*current_operation = IO_Close;
-					PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+					PostContextPacket( context, (DWORD)(0), overlapped );
 				}
 
 				LeaveCriticalSection( &context->context_cs );
@@ -3606,7 +3687,6 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 					{
 						sent = false;
 
-						InterlockedIncrement( &context->pending_operations );
 
 						*current_operation = IO_GetRequest;
 
@@ -3617,13 +3697,14 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								sent = true;
 
 								// The request was sent with the handshake.
-								PostQueuedCompletionStatus( hIOCP, context->_ssl_s->cbIoBuffer, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+								PostContextPacket( context, (DWORD)(context->_ssl_s->cbIoBuffer), overlapped );
 							}
 							else
 							{
 								context->wsabuf.buf = context->buffer;
 								context->wsabuf.len = context->buffer_size;
 
+								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 								SSL_WSARecv( context, overlapped, sent );
 							}
 						}
@@ -3631,14 +3712,13 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 						if ( !sent )
 						{
 							*current_operation = IO_Shutdown;
-							PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+							PostContextPacket( context, (DWORD)(0), overlapped );
 						}
 					}
 					else if ( scRet == SEC_E_INCOMPLETE_MESSAGE && *current_operation == IO_ServerHandshakeResponse )
 					{
 						// An SEC_E_INCOMPLETE_MESSAGE after SSL_WSAAccept_Reply can indicate that it doesn't support SSL/TLS, but sent the request as plaintext.
 
-						/*InterlockedIncrement( &context->pending_operations );
 
 						context->wsabuf.buf = context->buffer;
 						context->wsabuf.len = context->buffer_size;
@@ -3651,7 +3731,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 						__SSL_free( context->_ssl_s );
 						context->_ssl_s = NULL;
 
-						PostQueuedCompletionStatus( hIOCP, bytes_read, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );*/
+						// PostQueuedCompletionStatus( hIOCP, bytes_read, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
 
 						*current_operation = IO_Write;
 						*next_operation = IO_Close;	// This is closed because the SSL connection was never established. An SSL shutdown would just fail.
@@ -3669,18 +3749,18 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							"<!DOCTYPE html><html><head><title>301 Moved Permanently</title></head><body><h1>301 Moved Permanently</h1></body></html>", g_server_domain, g_server_port );
 
 						// We do a regular WSASend here since the connection was not encrypted.
+						AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 						nRet = _WSASend( context->socket, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 						if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 						{
 							*current_operation = IO_Close;
-							PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+							PostContextPacket( context, (DWORD)(0), overlapped );
 						}
 					}
 					else if ( scRet != SEC_I_CONTINUE_NEEDED && scRet != SEC_E_INCOMPLETE_MESSAGE && scRet != SEC_I_INCOMPLETE_CREDENTIALS )	// Stop handshake and close the connection.
 					{
-						InterlockedIncrement( &context->pending_operations );
 						*current_operation = IO_Close;
-						PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+						PostContextPacket( context, (DWORD)(0), overlapped );
 					}
 				}
 				else if ( context->cleanup == 2 )	// If we've forced the cleanup, then allow it to continue its steps.
@@ -3689,9 +3769,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				}
 				else	// We've already shutdown and/or closed the connection.
 				{
-					InterlockedIncrement( &context->pending_operations );
 					*current_operation = IO_Close;
-					PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+					PostContextPacket( context, (DWORD)(0), overlapped );
 				}
 
 				LeaveCriticalSection( &context->context_cs );
@@ -3716,9 +3795,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				}
 				else	// We've already shutdown and/or closed the connection.
 				{
-					InterlockedIncrement( &context->pending_operations );
 					*current_operation = IO_Close;
-					PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+					PostContextPacket( context, (DWORD)(0), overlapped );
 				}
 
 				LeaveCriticalSection( &context->context_cs );
@@ -3746,20 +3824,20 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 						InterlockedIncrement( &context->pending_operations );
 
 						// wsabuf will be offset in ParseHTTPHeader() to handle more data.
+						AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 						nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 						if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 						{
 							*current_operation = IO_Close;
-							PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+							PostContextPacket( context, (DWORD)(0), overlapped );
 						}
 					}
 					else if ( content_status == CONTENT_STATUS_FAILED )
 					{
 						context->status = STATUS_FAILED;
 
-						InterlockedIncrement( &context->pending_operations );
 						*current_operation = IO_Close;	// We don't need to shutdown the SSL/TLS connection since it will not have been established yet.
-						PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+						PostContextPacket( context, (DWORD)(0), overlapped );
 					}
 					else// if ( content_status == CONTENT_STATUS_GET_CONTENT );
 					{
@@ -3812,6 +3890,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 												*current_operation = IO_Write;
 												*next_operation = IO_OpenSSLClientHandshake;
 											
+												AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 												OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 											}
 										}
@@ -3828,7 +3907,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							if ( !sent )
 							{
 								*current_operation = IO_Close; // The tunneled HTTPS connection should be closed and not shutdown.
-								PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+								PostContextPacket( context, (DWORD)(0), overlapped );
 							}
 						}
 						else	// Proxy can't/won't tunnel SSL/TLS connections, or authentication is required.
@@ -3888,9 +3967,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 							if ( !skip_close )
 							{
-								InterlockedIncrement( &context->pending_operations );
 								*current_operation = IO_Close;	// We don't need to shutdown the SSL/TLS connection since it will not have been established yet.
-								PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+								PostContextPacket( context, (DWORD)(0), overlapped );
 							}
 						}
 					}
@@ -3901,9 +3979,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				}
 				else	// We've already shutdown and/or closed the connection.
 				{
-					InterlockedIncrement( &context->pending_operations );
 					*current_operation = IO_Close;
-					PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+					PostContextPacket( context, (DWORD)(0), overlapped );
 				}
 
 				LeaveCriticalSection( &context->context_cs );
@@ -3949,6 +4026,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							context->wsabuf.len -= context->current_bytes_read;
 
 							// wsabuf will be offset in ParseHTTPHeader() to handle more data.
+							AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 							nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 							if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 							{
@@ -3977,6 +4055,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 									*current_operation = IO_Write;
 
+									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 									nRet = _WSASend( context->socket, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
@@ -4025,6 +4104,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 							ConstructSOCKSRequest( context, 1 );
 
+							AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 							nRet = _WSASend( context->socket, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 							if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 							{
@@ -4065,6 +4145,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 													*current_operation = IO_Write;
 													*next_operation = IO_OpenSSLClientHandshake;
 												
+													AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 													OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 												}
 											}
@@ -4092,11 +4173,12 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								{
 									*current_operation = IO_GetContent;
 
+									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 									nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
 										*current_operation = IO_Close;
-										PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+										PostContextPacket( context, (DWORD)(0), overlapped );
 									}
 								}
 								else	// HTTP
@@ -4105,6 +4187,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 									ConstructRequest( context, false );
 
+									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 									nRet = _WSASend( context->socket, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
@@ -4129,7 +4212,6 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				{
 					connection_status = 1;	// Failed.
 
-					InterlockedIncrement( &context->pending_operations );
 				}
 
 				// If something failed.
@@ -4147,7 +4229,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 					}
 #endif
 					*current_operation = IO_Close;
-					PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+					PostContextPacket( context, (DWORD)(0), overlapped );
 				}
 
 				LeaveCriticalSection( &context->context_cs );
@@ -4242,6 +4324,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							//context->wsabuf.buf += bytes_decrypted;
 							//context->wsabuf.len -= bytes_decrypted;
 
+							AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 							SSL_WSARecv( context, overlapped, sent );
 							if ( !sent )
 							{
@@ -4279,9 +4362,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 					if ( content_status == CONTENT_STATUS_FAILED )
 					{
-						InterlockedIncrement( &context->pending_operations );
 						*current_operation = ( use_ssl ? IO_Shutdown : IO_Close );
-						PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+						PostContextPacket( context, (DWORD)(0), overlapped );
 					}
 					else if ( content_status == CONTENT_STATUS_HANDLE_RESPONSE )
 					{
@@ -4289,9 +4371,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 						if ( MakeRangeRequest( context ) == CONTENT_STATUS_FAILED )
 						{
-							InterlockedIncrement( &context->pending_operations );
 							*current_operation = ( use_ssl ? IO_Shutdown : IO_Close );
-							PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+							PostContextPacket( context, (DWORD)(0), overlapped );
 						}
 					}
 					else if ( content_status == CONTENT_STATUS_HANDLE_REQUEST )
@@ -4300,25 +4381,22 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 						if ( MakeResponse( context ) == CONTENT_STATUS_FAILED )
 						{
-							InterlockedIncrement( &context->pending_operations );
 							*current_operation = ( use_ssl ? IO_Shutdown : IO_Close );
-							PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+							PostContextPacket( context, (DWORD)(0), overlapped );
 						}
 					}
 					else if ( content_status == FTP_CONTENT_STATUS_HANDLE_REQUEST )
 					{
 						if ( MakeFTPResponse( context ) == FTP_CONTENT_STATUS_FAILED )
 						{
-							InterlockedIncrement( &context->pending_operations );
 							*current_operation = ( use_ssl ? IO_Shutdown : IO_Close );
-							PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+							PostContextPacket( context, (DWORD)(0), overlapped );
 						}
 					}
 					else if ( content_status == CONTENT_STATUS_READ_MORE_CONTENT || content_status == CONTENT_STATUS_READ_MORE_HEADER ) // Read more header information, or continue to read more content. Do not reset context->wsabuf since it may have been offset to handle partial data.
 					{
 						sent = true;
 
-						InterlockedIncrement( &context->pending_operations );
 
 						//*current_operation = IO_GetContent;
 
@@ -4328,10 +4406,11 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							{
 								// We need to post a non-zero status to avoid our code shutting down the connection.
 								// We'll use context->current_bytes_read for that, but it can be anything that's not zero.
-								PostQueuedCompletionStatus( hIOCP, context->current_bytes_read, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+								PostContextPacket( context, (DWORD)(context->current_bytes_read), overlapped );
 							}
 							else
 							{
+								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 								SSL_WSARecv( context, overlapped, sent );
 							}
 						}
@@ -4342,10 +4421,11 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							{
 								// We need to post a non-zero status to avoid our code shutting down the connection.
 								// We'll use context->current_bytes_read for that, but it can be anything that's not zero.
-								PostQueuedCompletionStatus( hIOCP, context->current_bytes_read, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+								PostContextPacket( context, (DWORD)(context->current_bytes_read), overlapped );
 							}
 							else
 							{
+								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 								nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 								if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 								{
@@ -4362,6 +4442,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							DWORD max_len = context->buffer_size - offset;
 							context->wsabuf.len = ( DWORD )ThrottleClampRecv( context, max_len );
 
+							AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 							nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 							if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 							{
@@ -4372,7 +4453,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 						if ( !sent )
 						{
 							*current_operation = ( use_ssl ? IO_Shutdown : IO_Close );
-							PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+							PostContextPacket( context, (DWORD)(0), overlapped );
 						}
 					}
 				}
@@ -4382,9 +4463,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				}
 				else	// We've already shutdown and/or closed the connection.
 				{
-					InterlockedIncrement( &context->pending_operations );
 					*current_operation = IO_Close;
-					PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+					PostContextPacket( context, (DWORD)(0), overlapped );
 				}
 
 				LeaveCriticalSection( &context->context_cs );
@@ -4401,7 +4481,6 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 					fzdi.FileOffset.QuadPart = 0;
 					fzdi.BeyondFinalZero.QuadPart = context->header_info.range_info->content_length;	// This will be greater than 0.
 
-					InterlockedIncrement( &context->pending_operations );
 
 					*current_operation = *next_operation;		// Will either be IO_ResumeGetContent or IO_SFTPResumeReadContent.
 					*next_operation = IO_SparseFileAllocate;	// Lets IO_ResumeGetContent know that we want to resume even though io_size will be 0 after the DeviceIoControl call.
@@ -4439,7 +4518,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 						else
 						{
 							*current_operation = ( use_ssl ? IO_Shutdown : IO_Close );
-							PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+							PostContextPacket( context, (DWORD)(0), overlapped );
 						}
 					}
 					else
@@ -4453,9 +4532,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				}
 				else	// We've already shutdown and/or closed the connection.
 				{
-					InterlockedIncrement( &context->pending_operations );
 					*current_operation = IO_Close;
-					PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+					PostContextPacket( context, (DWORD)(0), overlapped );
 				}
 
 				LeaveCriticalSection( &context->context_cs );
@@ -4489,7 +4567,6 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 					// Make sure we've written everything before we do anything else.
 					if ( io_size < context->write_wsabuf.len )
 					{
-						InterlockedIncrement( &context->pending_operations );
 
 						context->write_wsabuf.buf += io_size;
 						context->write_wsabuf.len -= io_size;
@@ -4513,7 +4590,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							else
 							{
 								*current_operation = ( use_ssl ? IO_Shutdown : IO_Close );
-								PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+								PostContextPacket( context, (DWORD)(0), overlapped );
 							}
 						}
 						else
@@ -4595,9 +4672,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									 chunked_length != 0 &&
 									 ( context->header_info.range_info->content_offset >= chunked_length ) ) )
 								{
-									InterlockedIncrement( &context->pending_operations );
 									*current_operation = ( use_ssl ? IO_Shutdown : IO_Close );
-									PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+									PostContextPacket( context, (DWORD)(0), overlapped );
 
 									content_status = CONTENT_STATUS_NONE;
 								}
@@ -4617,9 +4693,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									 transfer_length != 0 &&
 									 ( context->header_info.range_info->content_offset >= transfer_length ) )
 								{
-									InterlockedIncrement( &context->pending_operations );
 									*current_operation = ( use_ssl ? IO_Shutdown : IO_Close );
-									PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+									PostContextPacket( context, (DWORD)(0), overlapped );
 
 									content_status = CONTENT_STATUS_NONE;
 								}
@@ -4629,22 +4704,19 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 
 							if ( content_status == CONTENT_STATUS_FAILED )
 							{
-								InterlockedIncrement( &context->pending_operations );
 								*current_operation = ( use_ssl ? IO_Shutdown : IO_Close );
-								PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+								PostContextPacket( context, (DWORD)(0), overlapped );
 							}
 							else if ( content_status == CONTENT_STATUS_HANDLE_RESPONSE )
 							{
 								if ( MakeRangeRequest( context ) == CONTENT_STATUS_FAILED )
 								{
-									InterlockedIncrement( &context->pending_operations );
 									*current_operation = ( use_ssl ? IO_Shutdown : IO_Close );
-									PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+									PostContextPacket( context, (DWORD)(0), overlapped );
 								}
 							}
 							else if ( content_status == CONTENT_STATUS_READ_MORE_CONTENT || content_status == CONTENT_STATUS_READ_MORE_HEADER ) // Read more header information, or continue to read more content. Do not reset context->wsabuf since it may have been offset to handle partial data.
 							{
-								InterlockedIncrement( &context->pending_operations );
 
 								*current_operation = IO_GetContent;
 
@@ -4654,15 +4726,16 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									{
 										// We need to post a non-zero status to avoid our code shutting down the connection.
 										// We'll use context->current_bytes_read for that, but it can be anything that's not zero.
-										PostQueuedCompletionStatus( hIOCP, context->current_bytes_read, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+										PostContextPacket( context, (DWORD)(context->current_bytes_read), overlapped );
 									}
 									else
 									{
+										AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 										SSL_WSARecv( context, overlapped, sent );
 										if ( !sent )
 										{
 											*current_operation = IO_Shutdown;
-											PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+											PostContextPacket( context, (DWORD)(0), overlapped );
 										}
 									}
 								}
@@ -4673,15 +4746,16 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									{
 										// We need to post a non-zero status to avoid our code shutting down the connection.
 										// We'll use context->current_bytes_read for that, but it can be anything that's not zero.
-										PostQueuedCompletionStatus( hIOCP, context->current_bytes_read, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+										PostContextPacket( context, (DWORD)(context->current_bytes_read), overlapped );
 									}
 									else
 									{
+										AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 										nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 										if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 										{
 											*current_operation = IO_Shutdown;
-											PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+											PostContextPacket( context, (DWORD)(0), overlapped );
 										}
 									}
 								}
@@ -4691,11 +4765,12 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									// wsabuf.buf may be offset (partial data), so clamp against the remaining buffer space.
 									context->wsabuf.len = ( DWORD )ThrottleClampRecv( context, context->buffer_size - ( DWORD )( context->wsabuf.buf - context->buffer ) );
 
+									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 									nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
 										*current_operation = IO_Close;
-										PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+										PostContextPacket( context, (DWORD)(0), overlapped );
 									}
 								}
 							}
@@ -4708,9 +4783,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				}
 				else	// We've already shutdown and/or closed the connection.
 				{
-					InterlockedIncrement( &context->pending_operations );
 					*current_operation = IO_Close;
-					PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+					PostContextPacket( context, (DWORD)(0), overlapped );
 				}
 
 				LeaveCriticalSection( &context->context_cs );
@@ -4737,6 +4811,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 						context->wsabuf.len -= io_size;
 
 						// We do a regular WSASend here since that's what we last did in SSL_WSASend/OpenSSL_WSASend.
+						AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 						nRet = _WSASend( context->socket, &context->wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 						if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 						{
@@ -4753,7 +4828,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							else
 							{
 								*current_operation = IO_Close;
-								PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+								PostContextPacket( context, (DWORD)(0), overlapped );
 							}
 						}
 					}
@@ -4775,7 +4850,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								  *current_operation == IO_Shutdown ||
 								  *current_operation == IO_Close )
 						{
-							PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+							PostContextPacket( context, (DWORD)(0), overlapped );
 						}
 						else	// Read more data.
 						{
@@ -4785,12 +4860,14 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 							{
 								if ( context->_ssl_s != NULL )
 								{
+									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 									SSL_WSARecv( context, overlapped, sent );
 								}
 								else// if ( context->_ssl_o != NULL )
 								{
 									sent = true;
 
+									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 									nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 									if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 									{
@@ -4809,7 +4886,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									{
 										*current_operation = IO_Shutdown;
 									}
-									PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+									PostContextPacket( context, (DWORD)(0), overlapped );
 								}
 							}
 							else
@@ -4817,11 +4894,12 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 								// Per-connection speed limit: cap how much we request on this receive.
 								context->wsabuf.len = ( DWORD )ThrottleClampRecv( context, context->buffer_size - ( DWORD )( context->wsabuf.buf - context->buffer ) );
 
+								AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 								nRet = _WSARecv( context->socket, &context->wsabuf, 1, NULL, &dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 								if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 								{
 									*current_operation = IO_Close;
-									PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+									PostContextPacket( context, (DWORD)(0), overlapped );
 								}
 							}
 						}
@@ -4833,9 +4911,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				}
 				else	// We've already shutdown and/or closed the connection.
 				{
-					InterlockedIncrement( &context->pending_operations );
 					*current_operation = IO_Close;
-					PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+					PostContextPacket( context, (DWORD)(0), overlapped );
 				}
 
 				LeaveCriticalSection( &context->context_cs );
@@ -4893,11 +4970,12 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 						InterlockedIncrement( &context->pending_operations );
 
 						// We do a regular WSASend here since that's what we last did in SSL_WSASend.
+						AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 						nRet = _WSASend( context->socket, &context->keep_alive_wsabuf, 1, NULL, dwFlags, ( WSAOVERLAPPED * )overlapped, NULL );
 						if ( nRet == SOCKET_ERROR && ( _WSAGetLastError() != ERROR_IO_PENDING ) )
 						{
 							*current_operation = IO_Close;
-							PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+							PostContextPacket( context, (DWORD)(0), overlapped );
 						}
 					}
 				}
@@ -4907,9 +4985,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				}
 				else	// We've already shutdown and/or closed the connection.
 				{
-					InterlockedIncrement( &context->pending_operations );
 					*current_operation = IO_Close;
-					PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+					PostContextPacket( context, (DWORD)(0), overlapped );
 				}
 
 				LeaveCriticalSection( &context->context_cs );
@@ -4954,6 +5031,7 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 									*current_operation = IO_Write;
 									*next_operation = IO_Close;	// _SSL_shutdown() must not be called again if _SSL_get_error() is SSL_ERROR_SYSCALL or SSL_ERROR_SSL.
 
+									AcquireContextRef( context );	// The packet will release it when the IOCP handles it.
 									OpenSSL_WSASend( context, overlapped, &context->wsabuf, sent );
 								}
 							}
@@ -4977,9 +5055,8 @@ DWORD WINAPI IOCPConnection( LPVOID WorkThreadContext )
 				{
 					fall_through = false;
 
-					InterlockedIncrement( &context->pending_operations );
 					*current_operation = IO_Close;
-					PostQueuedCompletionStatus( hIOCP, 0, ( ULONG_PTR )context, ( WSAOVERLAPPED * )overlapped );
+					PostContextPacket( context, (DWORD)(0), overlapped );
 				}*/
 
 				LeaveCriticalSection( &context->context_cs );
@@ -6410,9 +6487,8 @@ void StartDownload( DOWNLOAD_INFO *di, unsigned char start_type, unsigned char s
 				{
 					context->status = ( finish_cleanup ? STATUS_NONE : STATUS_FAILED );
 
-					InterlockedIncrement( &context->pending_operations );
 					context->overlapped.current_operation = IO_Close;
-					PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped );
+					PostContextPacket( context, (DWORD)(0), &context->overlapped );
 				}
 			}
 			else if ( add_state == 2 )
@@ -9962,11 +10038,10 @@ void SplitLargestPart( DOWNLOAD_INFO *di )
 								{
 									new_context->status = STATUS_FAILED;
 
-									InterlockedIncrement( &new_context->pending_operations );
 
 									new_context->overlapped.current_operation = IO_Close;
 
-									PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )new_context, ( OVERLAPPED * )&new_context->overlapped );
+									PostContextPacket( new_context, (DWORD)(0), &new_context->overlapped );
 								}
 
 								return;
@@ -10052,11 +10127,10 @@ bool CleanupFTPContexts( SOCKET_CONTEXT *context )
 
 					if ( context->ftp_context->ftp_connection_type & FTP_CONNECTION_TYPE_CONTROL_WAIT )	// Control is waiting.
 					{
-						InterlockedIncrement( &context->ftp_context->pending_operations );
 
 						context->ftp_context->overlapped_close.current_operation = IO_Close;	// No need to shutdown.
 
-						PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context->ftp_context, ( OVERLAPPED * )&context->ftp_context->overlapped_close );
+						PostContextPacket( context->ftp_context, (DWORD)(0), &context->ftp_context->overlapped_close );
 					}
 
 					context->ftp_context->ftp_context = NULL;
@@ -11326,10 +11400,18 @@ void CleanupConnection( SOCKET_CONTEXT *context )
 			if ( context->buffer != NULL ){ GlobalFree( context->buffer ); }
 			if ( context->keep_alive_buffer != NULL ){ GlobalFree( context->keep_alive_buffer ); }
 
-			// Do NOT free the context here: a completion packet posted earlier may still be in
-			// the IOCP queue with this pointer. It is released by the timeout thread once the
-			// grace period has passed (see RetireContext).
-			RetireContext( context );
+			// The teardown is finished. The memory is released by whoever drops the last packet
+			// reference: a completion packet that is still queued would otherwise point at freed
+			// memory and crash in EnterCriticalSection (the 0xc0000005 from the 2026-11-25 dump).
+			InterlockedExchange( &context->teardown_done, 1 );
+
+			if ( InterlockedCompareExchange( &context->refs, 0, 0 ) == 0 )
+			{
+				// Nothing is queued for this context, release it right away.
+				DeleteCriticalSection( &context->context_cs );
+
+				GlobalFree( context );
+			}
 		}
 
 		LeaveCriticalSection( &cleanup_cs );
@@ -11556,11 +11638,10 @@ THREAD_RETURN CheckForUpdates( void * /*pArguments*/ )
 
 				context->status = STATUS_FAILED;
 
-				InterlockedIncrement( &context->pending_operations );
 
 				context->overlapped.current_operation = IO_Close;
 
-				PostQueuedCompletionStatus( g_hIOCP, 0, ( ULONG_PTR )context, ( OVERLAPPED * )&context->overlapped );
+				PostContextPacket( context, (DWORD)(0), &context->overlapped );
 			}
 			else
 			{

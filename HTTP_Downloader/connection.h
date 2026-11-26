@@ -418,6 +418,16 @@ struct SOCKET_CONTEXT
 	// The IOCP loop skips packets whose context is retired.
 	volatile LONG		retired;
 
+	// Number of completion packets that were posted and not handled yet. Every post/send/recv
+	// takes a reference (AcquireContextRef), the IOCP loop drops one when it finishes with the
+	// packet. The memory is only released once this reaches zero AND the teardown already ran,
+	// so a packet that is still queued can never point at freed memory.
+	volatile LONG		refs;
+
+	// The teardown (closing sockets, freeing buffers) has already been done; only the reference
+	// count keeps the memory alive now.
+	volatile LONG		teardown_done;
+
 	unsigned char		got_filename;		// For Content-Disposition header fields. 0 = none/not found, 1 = renamed (doesn't exist), 2 = renamed (exists)
 	unsigned char		got_last_modified;	// For Last-Modified header fields. 0 = none/not found, 1 = found, 2 = prompt
 
